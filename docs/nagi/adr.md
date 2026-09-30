@@ -1,0 +1,127 @@
+# Architecture Decision Records (ADRs): Semcrawl
+
+This document outlines key architectural decisions made for the Semcrawl project.
+
+---
+
+## Table of Contents
+- [ADR-001: Daemon + CLI Architecture with On-Demand Lifecycle](#adr-001-daemon--cli-architecture-with-on-demand-lifecycle)
+- [ADR-002: Inter-Process Communication via Unix Domain Socket](#adr-002-inter-process-communication-via-unix-domain-socket)
+- [ADR-003: Headless Browser Driver using `chromedp` with Fetcher Abstraction](#adr-003-headless-browser-driver-using-chromedp-with-fetcher-abstraction)
+- [ADR-004: In-House Jev Evaluator with `TYPESAFE_API_KEY` and DOM Pruning](#adr-004-in-house-jev-evaluator-with-typesafe_api_key-and-dom-pruning)
+
+---
+
+## ADR-001: Daemon + CLI Architecture with On-Demand Lifecycle
+
+### Status
+Accepted
+
+### Context
+Headless browser processes (e.g., Chromium) are resource-heavy and slow to boot. In traditional scraping scripts, launching a browser per CLI command or standalone script introduces major startup latency, risks zombie processes, and prevents reusing authenticated sessions or navigation contexts across sequential commands.
+
+Conversely, requiring users to manually manage background daemons (e.g., `systemctl`, background service managers) adds operational friction, especially for one-off CLI scripting and lightweight SDK integrations.
+
+### Decision
+We adopt a **Daemon + CLI architecture with on-demand lifecycle**:
+1. **On-Demand Auto-Start:** The Semcrawl CLI automatically launches the daemon in the background if it is not already running upon executing commands like `semcrawl open`.
+2. **Session Isolation:** The daemon manages individual scraping sessions (`session_id`), isolating browser contexts, cookies, and page tabs.
+3. **Inactivity Auto-Cleanup:**
+   - Sessions are terminated if no commands are received within a configurable idle duration (default: 5–10 minutes).
+   - The daemon process terminates itself automatically when there are zero active sessions for an extended idle period (e.g., 15 minutes).
+4. **Explicit Management:** Manual controls (`semcrawl daemon start`, `status`, `stop`) are retained for debugging, monitoring, and controlled service execution.
+
+### Consequences
+- **Positive:**
+  - High responsiveness for subsequent CLI calls by avoiding repeated browser startup overhead.
+  - No orphaned processes or persistent memory leaks due to automated timeouts.
+  - Seamless user experience: users do not need to manually boot or stop a background service.
+- **Negative:**
+  - Added architectural complexity in tracking session states, file locks, and background process spawning.
+
+---
+
+## ADR-002: Inter-Process Communication via Unix Domain Socket
+
+### Status
+Accepted
+
+### Context
+The Semcrawl CLI and the background Daemon run on the same local host and require low-latency, bidirectional or request-response communication to coordinate navigation, DOM querying, and data extraction.
+
+Options considered:
+- **Local TCP HTTP / gRPC:** Simple, but introduces TCP port binding conflicts, firewall prompts, and security risks if bound to non-loopback interfaces.
+- **Standard Input/Output (stdio):** Tight coupling to a single process hierarchy; difficult to share across multiple CLI calls and concurrent sessions.
+- **Unix Domain Socket (UDS) / Named Pipes:** File-system-based IPC, avoiding port conflicts and offering fast, secure inter-process communication with OS-level permission control.
+
+### Decision
+We use **Unix Domain Sockets (UDS)** (and Windows Named Pipes on Windows) running an HTTP/REST-like JSON protocol:
+1. The daemon creates and listens on a dedicated socket file (e.g., `$XDG_RUNTIME_DIR/semcrawl.sock` or `~/.semcrawl/semcrawl.sock`).
+2. The CLI connects to this socket file directly.
+3. Communications use lightweight HTTP/1.1 with JSON payloads over UDS using Go's standard library (`net.Listen("unix", ...)` and `http.Client` with custom `DialContext`).
+
+### Consequences
+- **Positive:**
+  - Fast, zero-port-conflict communication protected by file system permissions.
+  - Clean separation between daemon lifecycle and individual CLI invocations.
+  - Standard JSON schemas allow easy debugging and future client SDK integrations.
+- **Negative:**
+  - Requires platform-specific handling for Windows (using Named Pipes or fallback localhost port).
+
+---
+
+## ADR-003: Headless Browser Driver using `chromedp` with Fetcher Abstraction
+
+### Status
+Accepted
+
+### Context
+To perform semantic scraping on dynamic Single Page Applications (SPAs) and modern web pages, a dependable browser automation driver is essential. In the Go ecosystem, common options include `chromedp`, `rod`, or external tools like Playwright/Puppeteer via Node.js bridges.
+
+Stability, maturity, zero external runtime dependencies (pure Go), and alignment with future extensibility (WebDriver BiDi, lightweight static HTTP fetchers) were prioritized.
+
+### Decision
+1. **Adopt `chromedp` as Primary Driver:**
+   - Use `chromedp` due to its maturity, extensive production track record, and native Chrome DevTools Protocol (CDP) support in pure Go without Node.js dependencies.
+2. **Define a Decoupled `Fetcher` Interface:**
+   - Define a generic `Fetcher` interface in the daemon layer that abstracts page navigation, element evaluation, and DOM extraction.
+   - Initial implementation: `ChromeDPFetcher`.
+   - Planned implementations: `BiDiFetcher` (for Firefox/cross-browser support) and `HTTPFetcher` (for lightweight static page requests without browser rendering).
+
+### Consequences
+- **Positive:**
+  - Stable, well-tested browser control with minimal Go external dependencies.
+  - Clear architectural boundary allowing seamless introduction of non-browser or multi-browser backends in the future.
+- **Negative:**
+  - Direct CDP commands can be verbose and require careful context and timeout management.
+
+---
+
+## ADR-004: In-House Jev Evaluator with `TYPESAFE_API_KEY` and DOM Pruning
+
+### Status
+Accepted
+
+### Context
+Semcrawl's core differentiator is semantic element identification via **Jev** evaluation instead of brittle CSS/XPath selectors. The evaluator must:
+- Accurately parse hierarchical semantic queries (e.g., `"Search Results > Product List > Product"`).
+- Interface with external AI/LLM evaluation APIs or semantic models reliably.
+- Minimize performance overhead and latency caused by serializing and processing large DOM trees.
+
+### Decision
+1. **In-House Go Implementation:**
+   - Implement the Jev query parser and evaluator natively in Go to ensure tight integration, predictable memory consumption, and clean error handling.
+2. **API Key Configuration:**
+   - The evaluator authenticates against necessary evaluation APIs using the environment variable `TYPESAFE_API_KEY`.
+3. **DOM Pruning Strategy:**
+   - Avoid transferring full, unpruned DOM snapshots to the evaluation engine.
+   - Filter out invisible elements (`display: none`, `visibility: hidden`), structural noise (`<script>`, `<style>`, `<iframe>`, comments), and redundant wrappers before semantic classification.
+   - Traverse hierarchically segment-by-segment to narrow the search space before evaluating descendants.
+
+### Consequences
+- **Positive:**
+  - Full control over parsing logic, caching mechanisms, and external API invocation.
+  - Significantly reduced token count, bandwidth, and latency through pre-evaluation DOM pruning.
+  - Standardized configuration via `TYPESAFE_API_KEY`.
+- **Negative:**
+  - Maintenance overhead of maintaining custom AST/parser logic and pruning heuristics within the Semcrawl codebase.
