@@ -1,0 +1,18 @@
+{
+  "schema_version": 2,
+  "document_root": "docs/nagi",
+  "language": {
+    "chat": "ja",
+    "document": "en"
+  },
+  "llm": {
+    "document": {
+      "provider": "gemini-cli",
+      "model": "gemini-flash-latest"
+    },
+    "coding": {
+      "provider": "codex-acp",
+      "model": "gpt-6-luna"
+    }
+  }
+}
