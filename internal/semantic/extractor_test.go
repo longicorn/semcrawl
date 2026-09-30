@@ -3,6 +3,7 @@ package semantic
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/longicorn/semcrawl/internal/browser"
@@ -87,7 +88,7 @@ func TestExtractFindsRecordsAndSelectsFields(t *testing.T) {
 	if result.Items[1].Values["name"] != "Beta" || result.Items[1].Values["price"] != "$20" || result.Items[1].Values["url"] != "https://shop.example/beta" {
 		t.Fatalf("unexpected second item: %+v", result.Items[1])
 	}
-	if result.Usage.InputTokens != 6 || result.Model != "test-model" {
+	if result.Usage.InputTokens != 12 || result.Usage.OutputTokens != 8 || result.Model != "test-model" {
 		t.Fatalf("usage/model not combined: %+v", result)
 	}
 }
@@ -124,6 +125,49 @@ func TestExtractReturnsEmptyItemsWhenNoCandidatesMatch(t *testing.T) {
 	}
 	if result.Items == nil || len(result.Items) != 0 {
 		t.Fatalf("items = %#v, want empty array", result.Items)
+	}
+}
+
+func TestExtractExpandsRepresentativeByTagAndClass(t *testing.T) {
+	page := browser.DOMSnapshot{URL: "https://example.com", Nodes: []browser.DOMNode{
+		{ID: "root", Tag: "body", Text: "Alpha listing Beta listing"},
+		{ID: "a", ParentID: "root", Order: 1, Tag: "div", Class: "result-card active", Text: "Alpha listing"},
+		{ID: "a-name", ParentID: "a", Order: 2, Tag: "span", Text: "Alpha", DirectText: "Alpha"},
+		{ID: "b", ParentID: "root", Order: 3, Tag: "div", Class: "result-card active", Text: "Beta listing"},
+		{ID: "b-name", ParentID: "b", Order: 4, Tag: "span", Text: "Beta", DirectText: "Beta"},
+	}}
+	evaluations := 0
+	evaluator := fakeEvaluator(func(_ context.Context, request jev.Request) (*jev.Response, error) {
+		evaluations++
+		answers := make(map[string]jev.Answer)
+		for name, question := range request.Questions {
+			if question.Type == jev.QuestionNoul {
+				score := 0.99
+				if strings.HasPrefix(name, "class_") {
+					score = 0.99
+				} else if name != "match_a" {
+					score = 0
+				}
+				answers[name] = jev.Answer{Type: jev.QuestionNoul, Noul: &score}
+				continue
+			}
+			choice := "a-name"
+			answers[name] = jev.Answer{Type: jev.QuestionChoice, Choice: choice}
+		}
+		return &jev.Response{Model: "test", Answers: answers}, nil
+	})
+	result, err := NewExtractor(evaluator).Extract(context.Background(), page, "listing cards", []Field{{Name: "name", Description: "listing name"}}, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Items) != 2 || evaluations != 3 {
+		t.Fatalf("items=%d evaluator calls=%d, want 2 items and one representative, class, and field call", len(result.Items), evaluations)
+	}
+	if result.Items[0].NodeID != "a" || result.Items[1].NodeID != "b" {
+		t.Fatalf("unexpected expanded items: %+v", result.Items)
+	}
+	if result.Items[0].Values["name"] != "Alpha" || result.Items[1].Values["name"] != "Beta" {
+		t.Fatalf("fields were not copied using the representative selector: %+v", result.Items)
 	}
 }
 
