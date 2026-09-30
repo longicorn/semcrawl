@@ -72,11 +72,11 @@ func (e *Extractor) Extract(ctx context.Context, page browser.DOMSnapshot, targe
 	}
 	target = strings.TrimSpace(target)
 
-	candidates := makeCandidates(page.Nodes, limit*2)
+	candidates := makeCandidates(page.Nodes, len(page.Nodes))
 	if len(candidates) == 0 {
 		return nil, ErrNoCandidates
 	}
-	matches, usage, model, err := e.findMatches(ctx, page, target, candidates)
+	matches, usage, model, err := e.findMatchesByPattern(ctx, page, target, candidates)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +90,7 @@ func (e *Extractor) Extract(ctx context.Context, page browser.DOMSnapshot, targe
 	if len(matches) == 0 {
 		return result, nil
 	}
-	fieldUsage, fieldModel, err := e.extractFields(ctx, page, target, fields, matches, result.Items)
+	fieldUsage, fieldModel, err := e.extractFieldsFromRepresentative(ctx, page, target, fields, matches, result.Items)
 	if err != nil {
 		return nil, err
 	}
@@ -100,6 +100,139 @@ func (e *Extractor) Extract(ctx context.Context, page browser.DOMSnapshot, targe
 		result.Model = fieldModel
 	}
 	return result, nil
+}
+
+// findMatchesByPattern asks Jev to identify a representative record first,
+// then expands it to sibling records with the same tag and reusable classes.
+// It falls back to full candidate evaluation when no reliable group exists.
+func (e *Extractor) findMatchesByPattern(ctx context.Context, page browser.DOMSnapshot, target string, candidates []candidate) ([]candidate, jev.Usage, string, error) {
+	var totalUsage jev.Usage
+	model := ""
+	var representative *candidate
+	var representativeIndex int
+	for i := range candidates {
+		matched, usage, currentModel, err := e.findMatches(ctx, page, target, candidates[i:i+1])
+		addUsage(&totalUsage, usage)
+		if currentModel != "" {
+			model = currentModel
+		}
+		if err != nil {
+			return nil, totalUsage, model, err
+		}
+		if len(matched) > 0 {
+			representative = &matched[0]
+			representativeIndex = i
+			break
+		}
+	}
+	if representative == nil {
+		return nil, totalUsage, model, nil
+	}
+
+	selectors, usage, currentModel, err := e.selectReusableClasses(ctx, page, target, representative.node)
+	addUsage(&totalUsage, usage)
+	if currentModel != "" {
+		model = currentModel
+	}
+	if err == nil {
+		group := patternGroup(page.Nodes, representative.node, selectors)
+		if len(group) > 1 {
+			for i := range group {
+				group[i].repeated = true
+				group[i].score = representative.score
+			}
+			return group, totalUsage, model, nil
+		}
+	}
+
+	// If selector interpretation fails or returns nothing, retain the robust
+	// all-candidate evaluator as a fallback, excluding already checked nodes.
+	remaining := append([]candidate(nil), candidates[representativeIndex+1:]...)
+	matched, usage, currentModel, fallbackErr := e.findMatches(ctx, page, target, remaining)
+	addUsage(&totalUsage, usage)
+	if currentModel != "" {
+		model = currentModel
+	}
+	if fallbackErr != nil {
+		return nil, totalUsage, model, fallbackErr
+	}
+	matched = append([]candidate{*representative}, matched...)
+	return matched, totalUsage, model, nil
+}
+
+func (e *Extractor) selectReusableClasses(ctx context.Context, page browser.DOMSnapshot, target string, representative browser.DOMNode) ([]string, jev.Usage, string, error) {
+	tokens := strings.Fields(representative.Class)
+	if len(tokens) == 0 {
+		return nil, jev.Usage{}, "", nil
+	}
+	questions := make(map[string]jev.Question, len(tokens))
+	for index, token := range tokens {
+		questions[fmt.Sprintf("class_%d", index)] = jev.Question{
+			Type:         jev.QuestionNoul,
+			Instructions: fmt.Sprintf("Would the class token %q on representative <%s> reliably identify other records matching %q on this page? Say yes only if it is a reusable record/container class, not a layout, state, or decoration class.", token, representative.Tag, target),
+			Criteria:     map[string]any{"true": "This class token identifies the same type of record elements.", "false": "This class token is generic, decorative, or does not identify records."},
+		}
+	}
+	response, err := e.evaluator.Evaluate(ctx, jev.Request{
+		State: map[string]any{
+			"page":           map[string]string{"title": page.Title},
+			"user_request":   target,
+			"representative": describeNode(representative),
+			"class_tokens":   tokens,
+		},
+		Questions: questions,
+	})
+	if err != nil {
+		return nil, jev.Usage{}, "", fmt.Errorf("Jev representative class selection: %w", err)
+	}
+	var selected []string
+	for index, token := range tokens {
+		answer, ok := response.Answers[fmt.Sprintf("class_%d", index)]
+		if !ok || answer.Type != jev.QuestionNoul || answer.Noul == nil {
+			return nil, response.Usage, response.Model, fmt.Errorf("Jev response is missing reusable class decision for %q", token)
+		}
+		if *answer.Noul >= matchThreshold {
+			selected = append(selected, token)
+		}
+	}
+	return selected, response.Usage, response.Model, nil
+}
+
+func patternGroup(nodes []browser.DOMNode, representative browser.DOMNode, classes []string) []candidate {
+	if len(classes) == 0 {
+		return nil
+	}
+	var out []candidate
+	for _, node := range nodes {
+		if node.Tag != representative.Tag || !hasAnyClass(node.Class, classes) || !usefulNodeText(node) {
+			continue
+		}
+		out = append(out, candidate{node: node, repeated: true})
+	}
+	return out
+}
+
+func hasAnyClass(class string, targets []string) bool {
+	for _, target := range targets {
+		if hasClass(class, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func addUsage(total *jev.Usage, usage jev.Usage) {
+	total.InputTokens += usage.InputTokens
+	total.OutputTokens += usage.OutputTokens
+}
+
+func hasClass(class, target string) bool {
+	for _, token := range strings.Fields(class) {
+		if token == target {
+			return true
+		}
+	}
+	return false
 }
 
 func Validate(target string, fields []Field, limit int) error {
@@ -126,10 +259,14 @@ func Validate(target string, fields []Field, limit int) error {
 	return nil
 }
 
-func (e *Extractor) findMatches(ctx context.Context, page browser.DOMSnapshot, target string, candidates []candidate) ([]candidate, jev.Usage, string, error) {
+func (e *Extractor) findMatches(ctx context.Context, page browser.DOMSnapshot, target string, candidates []candidate, prior ...any) ([]candidate, jev.Usage, string, error) {
 	var matches []candidate
 	var usage jev.Usage
 	model := ""
+	if len(prior) > 0 {
+		usage = prior[0].(jev.Usage)
+		model = prior[1].(string)
+	}
 	for start := 0; start < len(candidates); start += matchBatchSize {
 		end := min(start+matchBatchSize, len(candidates))
 		batch := candidates[start:end]
@@ -260,6 +397,119 @@ func (e *Extractor) extractFields(ctx context.Context, page browser.DOMSnapshot,
 		}
 	}
 	return totalUsage, model, nil
+}
+
+type fieldSelector struct {
+	field Field
+	node  browser.DOMNode
+	rank  int
+}
+
+func (e *Extractor) extractFieldsFromRepresentative(ctx context.Context, page browser.DOMSnapshot, target string, fields []Field, matches []candidate, output []Match) (jev.Usage, string, error) {
+	selectors, usage, model, err := e.selectRepresentativeFields(ctx, page, target, fields, matches[0].node, output[0])
+	if err != nil {
+		return usage, model, err
+	}
+	children := childIndex(page.Nodes)
+	for itemIndex := 1; itemIndex < len(matches); itemIndex++ {
+		for _, selector := range selectors {
+			node, ok := findFieldNode(matches[itemIndex].node.ID, selector, children)
+			if !ok {
+				output[itemIndex].Values[selector.field.Name] = nil
+				continue
+			}
+			output[itemIndex].Values[selector.field.Name] = fieldValue(selector.field.Description, node, page.URL)
+		}
+	}
+	return usage, model, nil
+}
+
+func (e *Extractor) selectRepresentativeFields(ctx context.Context, page browser.DOMSnapshot, target string, fields []Field, representative browser.DOMNode, output Match) ([]fieldSelector, jev.Usage, string, error) {
+	children := childIndex(page.Nodes)
+	descendants := descendants(representative.ID, children)
+	if representative.DirectText != "" || representative.Href != "" || representative.Src != "" || representative.Alt != "" || representative.AriaLabel != "" || representative.Title != "" || len(representative.Attributes) > 0 {
+		descendants = append([]browser.DOMNode{representative}, descendants...)
+	}
+	fieldCandidates := selectFieldCandidates(descendants)
+	choiceNodes := make([]map[string]any, 0, len(fieldCandidates))
+	options := make(map[string]any, len(fieldCandidates)+1)
+	for _, node := range fieldCandidates {
+		choiceNodes = append(choiceNodes, describeNode(node))
+		options[node.ID] = formatNode(node)
+	}
+	options["none"] = "No element in this item contains the requested field."
+	questions := make(map[string]jev.Question, len(fields))
+	for index, field := range fields {
+		questions[fmt.Sprintf("field_%s_%d", representative.ID, index)] = jev.Question{
+			Type:         jev.QuestionChoice,
+			Instructions: fmt.Sprintf("For the representative record found as %q, select the descendant DOM element that contains the requested field %q. Choose none if unavailable.", target, field.Description),
+			Criteria:     options,
+		}
+	}
+	response, err := e.evaluator.Evaluate(ctx, jev.Request{
+		State:     map[string]any{"page": map[string]string{"title": page.Title}, "user_request": target, "item": describeNode(representative), "field_candidates": choiceNodes},
+		Questions: questions,
+	})
+	if err != nil {
+		return nil, jev.Usage{}, "", fmt.Errorf("Jev representative field selection: %w", err)
+	}
+	byID := make(map[string]browser.DOMNode, len(fieldCandidates))
+	for _, node := range fieldCandidates {
+		byID[node.ID] = node
+	}
+	selectors := make([]fieldSelector, 0, len(fields))
+	for index, field := range fields {
+		name := fmt.Sprintf("field_%s_%d", representative.ID, index)
+		answer, ok := response.Answers[name]
+		if !ok || answer.Type != jev.QuestionChoice || answer.Choice == "" {
+			return nil, response.Usage, response.Model, fmt.Errorf("Jev response is missing a valid answer for %s", name)
+		}
+		if answer.Choice == "none" {
+			output.Values[field.Name] = nil
+			continue
+		}
+		chosen, ok := byID[answer.Choice]
+		if !ok {
+			return nil, response.Usage, response.Model, fmt.Errorf("Jev selected unknown DOM candidate %q for %s", answer.Choice, name)
+		}
+		output.Values[field.Name] = fieldValue(field.Description, chosen, page.URL)
+		rank := 0
+		for _, sibling := range fieldCandidates {
+			if sibling.Tag == chosen.Tag && normalizedClass(sibling.Class) == normalizedClass(chosen.Class) {
+				if sibling.ID == chosen.ID {
+					break
+				}
+				rank++
+			}
+		}
+		selectors = append(selectors, fieldSelector{field: field, node: chosen, rank: rank})
+	}
+	return selectors, response.Usage, response.Model, nil
+}
+
+func findFieldNode(itemID string, selector fieldSelector, children map[string][]browser.DOMNode) (browser.DOMNode, bool) {
+	descendants := descendants(itemID, children)
+	var samePattern []browser.DOMNode
+	for _, node := range descendants {
+		if node.Tag == selector.node.Tag && normalizedClass(node.Class) == normalizedClass(selector.node.Class) {
+			samePattern = append(samePattern, node)
+		}
+	}
+	if selector.rank < len(samePattern) {
+		return samePattern[selector.rank], true
+	}
+	// On markup with per-item class variation, reuse the tag and pick its
+	// occurrence rank among descendants.
+	var sameTag []browser.DOMNode
+	for _, node := range descendants {
+		if node.Tag == selector.node.Tag {
+			sameTag = append(sameTag, node)
+		}
+	}
+	if selector.rank < len(sameTag) {
+		return sameTag[selector.rank], true
+	}
+	return browser.DOMNode{}, false
 }
 
 func makeCandidates(nodes []browser.DOMNode, limit int) []candidate {

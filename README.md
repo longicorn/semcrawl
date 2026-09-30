@@ -73,8 +73,9 @@ The `--target` value describes the records to find. Each `--field` is written
 as `name=description`: the name becomes the JSON key, and the description tells
 Jev what value to select. The response includes an `items` array; each item has
 a `node_id`, a match `score`, and a `values` object. The response also reports
-the Jev model and token usage. The maximum `--limit` is 100, and one to twelve
-fields can be requested.
+the Jev model and token usage. `--limit` sets the maximum number of matching
+items returned (up to 100), after the page's usable DOM candidates have been
+evaluated. One to twelve fields can be requested.
 
 `extract` sends compact summaries of visible page elements to the TypeSafe Jev
 API. Do not use it with page content that should not be sent to that service.
