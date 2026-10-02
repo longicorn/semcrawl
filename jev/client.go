@@ -15,9 +15,11 @@ import (
 )
 
 const (
-	DefaultBaseURL = "https://api.typesafe.ai"
-	DefaultModel   = "jev-latest"
-	maxBodyBytes   = 8 << 20
+	DefaultBaseURL     = "https://api.typesafe.ai"
+	DefaultModel       = "jev-latest"
+	maxBodyBytes       = 8 << 20
+	defaultConcurrency = 2
+	maxConcurrency     = 8
 )
 
 // QuestionType identifies one of Jev's supported question types.
@@ -98,9 +100,11 @@ func (e *APIError) Error() string {
 
 // Client calls the TypeSafe Jev API.
 type Client struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client
+	baseURL     string
+	apiKey      string
+	httpClient  *http.Client
+	requests    chan struct{}
+	concurrency int
 }
 
 // Option configures a Client.
@@ -122,6 +126,20 @@ func WithHTTPClient(httpClient *http.Client) Option {
 	}
 }
 
+// WithMaxConcurrency sets the maximum number of concurrent evaluation calls.
+// Values below one use the default of two; values above eight are capped.
+func WithMaxConcurrency(concurrency int) Option {
+	return func(c *Client) {
+		if concurrency < 1 {
+			c.concurrency = defaultConcurrency
+		} else if concurrency > maxConcurrency {
+			c.concurrency = maxConcurrency
+		} else {
+			c.concurrency = concurrency
+		}
+	}
+}
+
 // NewClient creates a client. An empty apiKey reads TYPESAFE_API_KEY from the
 // environment. The default HTTP timeout is 30 seconds.
 func NewClient(apiKey string, options ...Option) *Client {
@@ -129,13 +147,15 @@ func NewClient(apiKey string, options ...Option) *Client {
 		apiKey = os.Getenv("TYPESAFE_API_KEY")
 	}
 	c := &Client{
-		baseURL:    DefaultBaseURL,
-		apiKey:     apiKey,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		baseURL:     DefaultBaseURL,
+		apiKey:      apiKey,
+		httpClient:  &http.Client{Timeout: 30 * time.Second},
+		concurrency: defaultConcurrency,
 	}
 	for _, option := range options {
 		option(c)
 	}
+	c.requests = make(chan struct{}, c.concurrency)
 	return c
 }
 
@@ -150,6 +170,12 @@ func (c *Client) Evaluate(ctx context.Context, request Request) (*Response, erro
 	if len(request.Questions) == 0 {
 		return nil, errors.New("jev: at least one question is required")
 	}
+	select {
+	case c.requests <- struct{}{}:
+		defer func() { <-c.requests }()
+	case <-ctx.Done():
+		return nil, fmt.Errorf("jev: wait for request slot: %w", ctx.Err())
+	}
 	return doJSON[Response](ctx, c, http.MethodPost, "/v1/systemone", request)
 }
 
@@ -163,39 +189,66 @@ func (c *Client) ListModels(ctx context.Context) (*ModelsResponse, error) {
 
 func doJSON[T any](ctx context.Context, c *Client, method, path string, body any) (*T, error) {
 	var requestBody io.Reader
+	var encoded []byte
 	if body != nil {
-		encoded, err := json.Marshal(body)
+		var err error
+		encoded, err = json.Marshal(body)
 		if err != nil {
 			return nil, fmt.Errorf("jev: encode request: %w", err)
 		}
-		requestBody = bytes.NewReader(encoded)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, requestBody)
-	if err != nil {
-		return nil, fmt.Errorf("jev: create request: %w", err)
+	const maxRetries = 3
+	for attempt := 0; ; attempt++ {
+		if body != nil {
+			requestBody = bytes.NewReader(encoded)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, requestBody)
+		if err != nil {
+			return nil, fmt.Errorf("jev: create request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("jev: request: %w", err)
+		}
+		responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
+		statusCode := resp.StatusCode
+		retryAfter := resp.Header.Get("Retry-After")
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("jev: read response: %w", readErr)
+		}
+		if len(responseBody) > maxBodyBytes {
+			return nil, fmt.Errorf("jev: response exceeds %d bytes", maxBodyBytes)
+		}
+		if statusCode == http.StatusTooManyRequests || statusCode == 529 {
+			if attempt < maxRetries {
+				delay := time.Duration(1<<attempt) * 250 * time.Millisecond
+				if seconds, err := time.ParseDuration(retryAfter + "s"); err == nil && seconds > 0 {
+					delay = seconds
+				} else if retryTime, err := http.ParseTime(retryAfter); err == nil && time.Until(retryTime) > 0 {
+					delay = time.Until(retryTime)
+				}
+				timer := time.NewTimer(delay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return nil, fmt.Errorf("jev: retry wait: %w", ctx.Err())
+				case <-timer.C:
+				}
+				continue
+			}
+		}
+		if statusCode < 200 || statusCode >= 300 {
+			return nil, &APIError{StatusCode: statusCode, Body: responseBody}
+		}
+		var result T
+		if err := json.Unmarshal(responseBody, &result); err != nil {
+			return nil, fmt.Errorf("jev: decode response: %w", err)
+		}
+		return &result, nil
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("jev: request: %w", err)
-	}
-	defer resp.Body.Close()
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("jev: read response: %w", err)
-	}
-	if len(responseBody) > maxBodyBytes {
-		return nil, fmt.Errorf("jev: response exceeds %d bytes", maxBodyBytes)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &APIError{StatusCode: resp.StatusCode, Body: responseBody}
-	}
-	var result T
-	if err := json.Unmarshal(responseBody, &result); err != nil {
-		return nil, fmt.Errorf("jev: decode response: %w", err)
-	}
-	return &result, nil
 }

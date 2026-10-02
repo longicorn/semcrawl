@@ -125,3 +125,60 @@ Semcrawl's core differentiator is semantic element identification via **Jev** ev
   - Standardized configuration via `TYPESAFE_API_KEY`.
 - **Negative:**
   - Maintenance overhead of maintaining custom AST/parser logic and pruning heuristics within the Semcrawl codebase.
+
+---
+
+## ADR-005: Batched Tag/Class Search with Field-Anchored Fallback
+
+### Status
+Accepted
+
+### Context
+The previous representative search evaluated one DOM node per Jev request until
+its first match. Although repeated siblings were prioritized, unrelated nodes
+before a matching record caused many sequential network round trips. Expansion
+by a reusable class could also include unrelated elements without verification.
+
+### Decision
+1. Reuse the browser DOM snapshot and the existing Jev evaluator and field
+   extraction interfaces. Include usable non-landmark containers in search.
+2. Before grouping, skip unclassified `div` and `span` wrappers whose rendered
+   text exactly repeats their parent's text. Their text remains on the parent;
+   wrappers with direct text, classes, roles, or useful attributes remain
+   candidates. Group the remaining nodes by tag and the complete sorted class
+   token set, independent of class order or parent. Preserve complete class
+   strings in the snapshot.
+   The browser snapshot also omits empty unclassified `div`/`span` leaves and
+   `br`/`hr`/`wbr` separators; rendered text is collected from their surrounding
+   elements. This follows the wrapper-collapse idea used by
+   [mcprune](https://github.com/hamr0/mcprune), with a narrower rule for the
+   rendered DOM so repeated cards, tables, links, and field-bearing nodes stay intact.
+3. Evaluate group summaries in batches of 20 groups. Include counts and at most
+   three samples spread across each group, with text and attributes, so opaque
+   class names do not need to carry semantic meaning.
+4. Verify every node in shortlisted groups against the target, in batches of 20
+   nodes. Run independent group and node batches with bounded concurrent Jev
+   evaluations, configured by `SEMCRAWL_JEV_CONCURRENCY` (default 2, range 1–8).
+   Sharing tag/class alone does not establish a record match.
+5. If no records match, evaluate field-bearing nodes in batches against the
+   requested field descriptions and target. Retain all matching anchors, then
+   evaluate deduplicated candidates starting at the anchors and proceeding to
+   their nearest ancestors. Stop each matched branch. Prefer matched descendants
+   over matching ancestors reached through other branches.
+6. Preserve DOM output order, aggregate model usage across all stages, and apply
+   the result limit before reusing representative-based field extraction. API
+   failures and malformed answers remain errors, rather than triggering fallback.
+
+### Consequences
+- Fewer sequential requests when many nodes share a small number of signatures.
+- Independent search batches overlap at the configured concurrency; Jev 429
+  and 529 responses are retried with exponential backoff.
+- Group summaries bound sample payload; verification prevents unconditional
+  class-based expansion. Groups with unique utility class sets can remain costly.
+- Group samples can miss heterogeneous content. Bottom-up fallback recovers
+  records only when a relevant field anchor is recognized; it is not exhaustive.
+- The fallback can be expensive on large pages, but no longer sends one request
+  per field node or ancestor. CLI arguments and JSON result structure are unchanged.
+- Mocked tests compare request counts and serialized payload sizes, verify
+  unrelated nodes are rejected, and cover shared ancestors at differing depths.
+  Real API latency and classification accuracy require live-page measurement.

@@ -49,9 +49,14 @@ first `open` if you plan to use `extract`:
 
 ```sh
 export TYPESAFE_API_KEY="your-api-key"
+export SEMCRAWL_JEV_CONCURRENCY=2
 
 go run ./cmd/semcrawl open
 ```
+
+`SEMCRAWL_JEV_CONCURRENCY` sets concurrent Jev evaluations per daemon. It
+defaults to `2` and accepts values from `1` to `8`. Restart the daemon after
+changing it.
 
 `open` prints JSON containing a `session_id`. Use that ID in subsequent
 commands:
@@ -74,8 +79,15 @@ as `name=description`: the name becomes the JSON key, and the description tells
 Jev what value to select. The response includes an `items` array; each item has
 a `node_id`, a match `score`, and a `values` object. The response also reports
 the Jev model and token usage. `--limit` sets the maximum number of matching
-items returned (up to 100), after the page's usable DOM candidates have been
-evaluated. One to twelve fields can be requested.
+items returned (up to 100), after candidate search and verification. One to twelve
+fields can be requested.
+
+Extraction first groups usable DOM nodes by tag and the complete, sorted class
+set. Jev evaluates group summaries with up to three samples, then verifies the
+actual nodes in selected groups in batches of 20. If no records match, Jev
+locates requested field elements and evaluates their ancestors from the nearest
+level upward, sharing checks across field anchors. Matching records retain DOM
+order; `--limit` is applied before field extraction.
 
 `extract` sends compact summaries of visible page elements to the TypeSafe Jev
 API. Do not use it with page content that should not be sent to that service.

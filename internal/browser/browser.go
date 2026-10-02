@@ -124,7 +124,16 @@ func (t *chromeTab) DOMSnapshot(ctx context.Context) (DOMSnapshot, error) {
     const rect = el.getBoundingClientRect();
     return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0" && rect.width > 0 && rect.height > 0;
   };
-  const elements = [document.body, ...document.body.querySelectorAll("*")].filter(el => el && visible(el));
+  const elements = [document.body, ...document.body.querySelectorAll("*")].filter(el => {
+    if (!el || !visible(el)) return false;
+    const tag = el.tagName.toLowerCase();
+    // These tags only create visual separation; rendered text remains on the
+    // surrounding elements. Empty generic leaves likewise carry no fields.
+    if (tag === "br" || tag === "hr" || tag === "wbr") return false;
+    if ((tag === "div" || tag === "span") && el.childElementCount === 0 &&
+        clean(el.textContent) === "" && !el.className && el.attributes.length === 0) return false;
+    return true;
+  });
   const ids = new WeakMap();
   elements.forEach((el, index) => ids.set(el, "n" + index));
   const nodes = elements.map((el, order) => {
@@ -132,9 +141,11 @@ func (t *chromeTab) DOMSnapshot(ctx context.Context) (DOMSnapshot, error) {
     return {
       id: ids.get(el), parent_id: ids.get(el.parentElement) || "", order,
       tag: el.tagName.toLowerCase(), role: el.getAttribute("role") || "",
-      class: typeof el.className === "string" ? el.className.slice(0, 160) : "",
+      class: typeof el.className === "string" ? el.className : "",
       aria_label: el.getAttribute("aria-label") || "",
-      text: clean(el.innerText || el.textContent).slice(0, 700),
+      // Prefer rendered text for HTML so script/style source is never treated
+      // as page content. SVG often has no innerText, so retain its text nodes.
+      text: clean(el.innerText || (el.namespaceURI === "http://www.w3.org/2000/svg" ? el.textContent : "")).slice(0, 700),
       direct_text: clean(direct).slice(0, 300),
       href: typeof el.href === "string" ? (el.href || "") : (el.getAttribute("href") || ""),
       src: el.currentSrc || (typeof el.src === "string" ? (el.src || "") : (el.getAttribute("src") || "")),

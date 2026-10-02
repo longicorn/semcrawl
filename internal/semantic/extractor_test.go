@@ -37,7 +37,7 @@ func TestExtractFindsRecordsAndSelectsFields(t *testing.T) {
 		for name, question := range request.Questions {
 			if question.Type == jev.QuestionNoul {
 				score := 0.0
-				if name == "match_n2" || name == "match_n6" {
+				if name == "match_n2" || name == "match_n6" || name == "group_g1" {
 					score = 0.98
 				}
 				answers[name] = jev.Answer{Type: jev.QuestionNoul, Noul: &score}
@@ -88,7 +88,7 @@ func TestExtractFindsRecordsAndSelectsFields(t *testing.T) {
 	if result.Items[1].Values["name"] != "Beta" || result.Items[1].Values["price"] != "$20" || result.Items[1].Values["url"] != "https://shop.example/beta" {
 		t.Fatalf("unexpected second item: %+v", result.Items[1])
 	}
-	if result.Usage.InputTokens != 12 || result.Usage.OutputTokens != 8 || result.Model != "test-model" {
+	if result.Usage.InputTokens != 9 || result.Usage.OutputTokens != 6 || result.Model != "test-model" {
 		t.Fatalf("usage/model not combined: %+v", result)
 	}
 }
@@ -113,7 +113,11 @@ func TestExtractReturnsEmptyItemsWhenNoCandidatesMatch(t *testing.T) {
 	}}
 	evaluator := fakeEvaluator(func(_ context.Context, request jev.Request) (*jev.Response, error) {
 		answers := make(map[string]jev.Answer)
-		for name := range request.Questions {
+		for name, question := range request.Questions {
+			if question.Type == jev.QuestionChoice {
+				answers[name] = jev.Answer{Type: jev.QuestionChoice, Choice: "none"}
+				continue
+			}
 			score := 0.1
 			answers[name] = jev.Answer{Type: jev.QuestionNoul, Noul: &score}
 		}
@@ -128,7 +132,7 @@ func TestExtractReturnsEmptyItemsWhenNoCandidatesMatch(t *testing.T) {
 	}
 }
 
-func TestExtractExpandsRepresentativeByTagAndClass(t *testing.T) {
+func TestExtractVerifiesNodesInSelectedTagClassGroup(t *testing.T) {
 	page := browser.DOMSnapshot{URL: "https://example.com", Nodes: []browser.DOMNode{
 		{ID: "root", Tag: "body", Text: "Alpha listing Beta listing"},
 		{ID: "a", ParentID: "root", Order: 1, Tag: "div", Class: "result-card active", Text: "Alpha listing"},
@@ -143,9 +147,9 @@ func TestExtractExpandsRepresentativeByTagAndClass(t *testing.T) {
 		for name, question := range request.Questions {
 			if question.Type == jev.QuestionNoul {
 				score := 0.99
-				if strings.HasPrefix(name, "class_") {
+				if strings.HasPrefix(name, "group_") {
 					score = 0.99
-				} else if name != "match_a" {
+				} else if name != "match_a" && name != "match_b" {
 					score = 0
 				}
 				answers[name] = jev.Answer{Type: jev.QuestionNoul, Noul: &score}
@@ -161,7 +165,7 @@ func TestExtractExpandsRepresentativeByTagAndClass(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(result.Items) != 2 || evaluations != 3 {
-		t.Fatalf("items=%d evaluator calls=%d, want 2 items and one representative, class, and field call", len(result.Items), evaluations)
+		t.Fatalf("items=%d evaluator calls=%d, want 2 items and one group, node verification, and field call", len(result.Items), evaluations)
 	}
 	if result.Items[0].NodeID != "a" || result.Items[1].NodeID != "b" {
 		t.Fatalf("unexpected expanded items: %+v", result.Items)

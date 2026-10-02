@@ -13,11 +13,13 @@ import (
 )
 
 const (
-	matchBatchSize = 20
-	fieldBatchSize = 5
-	matchThreshold = 0.65
-	maxFields      = 12
-	maxChildren    = 30
+	matchBatchSize     = 20
+	fieldBatchSize     = 5
+	matchThreshold     = 0.65
+	maxFields          = 12
+	maxChildren        = 30
+	DefaultConcurrency = 2
+	MaxConcurrency     = 8
 )
 
 var ErrNoCandidates = errors.New("no usable DOM elements found on this page")
@@ -57,11 +59,26 @@ type fieldWork struct {
 }
 
 type Extractor struct {
-	evaluator Evaluator
+	evaluator   Evaluator
+	concurrency int
 }
 
 func NewExtractor(evaluator Evaluator) *Extractor {
-	return &Extractor{evaluator: evaluator}
+	return NewExtractorWithConcurrency(evaluator, DefaultConcurrency)
+}
+
+func NewExtractorWithConcurrency(evaluator Evaluator, concurrency int) *Extractor {
+	if concurrency < 1 || concurrency > MaxConcurrency {
+		concurrency = DefaultConcurrency
+	}
+	return &Extractor{evaluator: evaluator, concurrency: concurrency}
+}
+
+func ValidateConcurrency(concurrency int) error {
+	if concurrency < 1 || concurrency > MaxConcurrency {
+		return fmt.Errorf("Jev concurrency must be between 1 and %d", MaxConcurrency)
+	}
+	return nil
 }
 
 // Extract uses Jev to find elements matching target, then selects each
@@ -72,11 +89,11 @@ func (e *Extractor) Extract(ctx context.Context, page browser.DOMSnapshot, targe
 	}
 	target = strings.TrimSpace(target)
 
-	candidates := makeCandidates(page.Nodes, len(page.Nodes))
+	candidates := groupedCandidates(page.Nodes)
 	if len(candidates) == 0 {
 		return nil, ErrNoCandidates
 	}
-	matches, usage, model, err := e.findMatchesByPattern(ctx, page, target, candidates)
+	matches, usage, model, err := e.findGroupedMatches(ctx, page, target, fields, candidates)
 	if err != nil {
 		return nil, err
 	}
@@ -102,137 +119,9 @@ func (e *Extractor) Extract(ctx context.Context, page browser.DOMSnapshot, targe
 	return result, nil
 }
 
-// findMatchesByPattern asks Jev to identify a representative record first,
-// then expands it to sibling records with the same tag and reusable classes.
-// It falls back to full candidate evaluation when no reliable group exists.
-func (e *Extractor) findMatchesByPattern(ctx context.Context, page browser.DOMSnapshot, target string, candidates []candidate) ([]candidate, jev.Usage, string, error) {
-	var totalUsage jev.Usage
-	model := ""
-	var representative *candidate
-	var representativeIndex int
-	for i := range candidates {
-		matched, usage, currentModel, err := e.findMatches(ctx, page, target, candidates[i:i+1])
-		addUsage(&totalUsage, usage)
-		if currentModel != "" {
-			model = currentModel
-		}
-		if err != nil {
-			return nil, totalUsage, model, err
-		}
-		if len(matched) > 0 {
-			representative = &matched[0]
-			representativeIndex = i
-			break
-		}
-	}
-	if representative == nil {
-		return nil, totalUsage, model, nil
-	}
-
-	selectors, usage, currentModel, err := e.selectReusableClasses(ctx, page, target, representative.node)
-	addUsage(&totalUsage, usage)
-	if currentModel != "" {
-		model = currentModel
-	}
-	if err == nil {
-		group := patternGroup(page.Nodes, representative.node, selectors)
-		if len(group) > 1 {
-			for i := range group {
-				group[i].repeated = true
-				group[i].score = representative.score
-			}
-			return group, totalUsage, model, nil
-		}
-	}
-
-	// If selector interpretation fails or returns nothing, retain the robust
-	// all-candidate evaluator as a fallback, excluding already checked nodes.
-	remaining := append([]candidate(nil), candidates[representativeIndex+1:]...)
-	matched, usage, currentModel, fallbackErr := e.findMatches(ctx, page, target, remaining)
-	addUsage(&totalUsage, usage)
-	if currentModel != "" {
-		model = currentModel
-	}
-	if fallbackErr != nil {
-		return nil, totalUsage, model, fallbackErr
-	}
-	matched = append([]candidate{*representative}, matched...)
-	return matched, totalUsage, model, nil
-}
-
-func (e *Extractor) selectReusableClasses(ctx context.Context, page browser.DOMSnapshot, target string, representative browser.DOMNode) ([]string, jev.Usage, string, error) {
-	tokens := strings.Fields(representative.Class)
-	if len(tokens) == 0 {
-		return nil, jev.Usage{}, "", nil
-	}
-	questions := make(map[string]jev.Question, len(tokens))
-	for index, token := range tokens {
-		questions[fmt.Sprintf("class_%d", index)] = jev.Question{
-			Type:         jev.QuestionNoul,
-			Instructions: fmt.Sprintf("Would the class token %q on representative <%s> reliably identify other records matching %q on this page? Say yes only if it is a reusable record/container class, not a layout, state, or decoration class.", token, representative.Tag, target),
-			Criteria:     map[string]any{"true": "This class token identifies the same type of record elements.", "false": "This class token is generic, decorative, or does not identify records."},
-		}
-	}
-	response, err := e.evaluator.Evaluate(ctx, jev.Request{
-		State: map[string]any{
-			"page":           map[string]string{"title": page.Title},
-			"user_request":   target,
-			"representative": describeNode(representative),
-			"class_tokens":   tokens,
-		},
-		Questions: questions,
-	})
-	if err != nil {
-		return nil, jev.Usage{}, "", fmt.Errorf("Jev representative class selection: %w", err)
-	}
-	var selected []string
-	for index, token := range tokens {
-		answer, ok := response.Answers[fmt.Sprintf("class_%d", index)]
-		if !ok || answer.Type != jev.QuestionNoul || answer.Noul == nil {
-			return nil, response.Usage, response.Model, fmt.Errorf("Jev response is missing reusable class decision for %q", token)
-		}
-		if *answer.Noul >= matchThreshold {
-			selected = append(selected, token)
-		}
-	}
-	return selected, response.Usage, response.Model, nil
-}
-
-func patternGroup(nodes []browser.DOMNode, representative browser.DOMNode, classes []string) []candidate {
-	if len(classes) == 0 {
-		return nil
-	}
-	var out []candidate
-	for _, node := range nodes {
-		if node.Tag != representative.Tag || !hasAnyClass(node.Class, classes) || !usefulNodeText(node) {
-			continue
-		}
-		out = append(out, candidate{node: node, repeated: true})
-	}
-	return out
-}
-
-func hasAnyClass(class string, targets []string) bool {
-	for _, target := range targets {
-		if hasClass(class, target) {
-			return true
-		}
-	}
-	return false
-}
-
 func addUsage(total *jev.Usage, usage jev.Usage) {
 	total.InputTokens += usage.InputTokens
 	total.OutputTokens += usage.OutputTokens
-}
-
-func hasClass(class, target string) bool {
-	for _, token := range strings.Fields(class) {
-		if token == target {
-			return true
-		}
-	}
-	return false
 }
 
 func Validate(target string, fields []Field, limit int) error {
@@ -267,6 +156,8 @@ func (e *Extractor) findMatches(ctx context.Context, page browser.DOMSnapshot, t
 		usage = prior[0].(jev.Usage)
 		model = prior[1].(string)
 	}
+	var batches [][]candidate
+	var requests []jev.Request
 	for start := 0; start < len(candidates); start += matchBatchSize {
 		end := min(start+matchBatchSize, len(candidates))
 		batch := candidates[start:end]
@@ -281,7 +172,7 @@ func (e *Extractor) findMatches(ctx context.Context, page browser.DOMSnapshot, t
 				Criteria:     map[string]any{"true": "This element is one result matching the user's requested target.", "false": "This element is only a wrapper or does not match the requested target."},
 			}
 		}
-		response, err := e.evaluator.Evaluate(ctx, jev.Request{
+		requests = append(requests, jev.Request{
 			State: map[string]any{
 				"page":         map[string]string{"title": page.Title},
 				"user_request": target,
@@ -289,12 +180,17 @@ func (e *Extractor) findMatches(ctx context.Context, page browser.DOMSnapshot, t
 			},
 			Questions: questions,
 		})
-		if err != nil {
-			return nil, usage, model, fmt.Errorf("Jev target matching: %w", err)
+		batches = append(batches, batch)
+	}
+	for index, result := range evaluateParallel(ctx, e.evaluator, e.concurrency, requests) {
+		if result.err != nil {
+			return nil, usage, model, fmt.Errorf("Jev target matching: %w", result.err)
 		}
-		usage.InputTokens += response.Usage.InputTokens
-		usage.OutputTokens += response.Usage.OutputTokens
-		model = response.Model
+		response, batch := result.response, batches[index]
+		addUsage(&usage, response.Usage)
+		if response.Model != "" {
+			model = response.Model
+		}
 		for _, item := range batch {
 			name := "match_" + item.node.ID
 			answer, ok := response.Answers[name]
@@ -520,7 +416,7 @@ func makeCandidates(nodes []browser.DOMNode, limit int) []candidate {
 	type groupKey struct{ parent, signature string }
 	groups := make(map[groupKey][]browser.DOMNode)
 	for _, node := range nodes {
-		if !usefulNodeText(node) {
+		if !eligibleSemanticNode(node) || !usefulNodeText(node) {
 			continue
 		}
 		key := groupKey{node.ParentID, node.Tag + "|" + node.Role + "|" + normalizedClass(node.Class)}
@@ -537,7 +433,7 @@ func makeCandidates(nodes []browser.DOMNode, limit int) []candidate {
 	out := make([]candidate, 0, limit)
 	added := make(map[string]bool)
 	add := func(node browser.DOMNode, repeated bool) {
-		if len(out) >= limit || added[node.ID] || !usefulNodeText(node) {
+		if len(out) >= limit || added[node.ID] || !eligibleSemanticNode(node) || !usefulNodeText(node) {
 			return
 		}
 		added[node.ID] = true
@@ -570,14 +466,14 @@ func repeatedCount(matches []candidate) int {
 
 func normalizedClass(class string) string {
 	parts := strings.Fields(class)
-	if len(parts) > 4 {
-		parts = parts[:4]
-	}
 	sort.Strings(parts)
 	return strings.Join(parts, ".")
 }
 
 func isLandmark(node browser.DOMNode) bool {
+	if !eligibleSemanticNode(node) {
+		return false
+	}
 	switch node.Tag {
 	case "main", "article", "section", "li", "tr", "h1", "h2", "h3", "blockquote", "a", "button":
 		return true
@@ -598,10 +494,24 @@ func isTextLeaf(node browser.DOMNode, children map[string][]browser.DOMNode) boo
 			return false
 		}
 	}
-	return node.Tag != "script" && node.Tag != "style" && node.Tag != "noscript"
+	return eligibleSemanticNode(node)
+}
+
+// eligibleSemanticNode excludes elements that rarely carry useful scraping
+// records or fields. The page snapshot itself remains intact for `content`.
+func eligibleSemanticNode(node browser.DOMNode) bool {
+	switch strings.ToLower(node.Tag) {
+	case "script", "style", "noscript", "template", "font", "center", "br", "hr", "wbr":
+		return false
+	default:
+		return true
+	}
 }
 
 func usefulNodeText(node browser.DOMNode) bool {
+	if !eligibleSemanticNode(node) {
+		return false
+	}
 	text := strings.TrimSpace(node.Text)
 	if len(text) >= 12 {
 		return true
@@ -646,6 +556,9 @@ func descendants(id string, children map[string][]browser.DOMNode) []browser.DOM
 func selectFieldCandidates(nodes []browser.DOMNode) []browser.DOMNode {
 	out := make([]browser.DOMNode, 0, maxChildren)
 	for _, node := range nodes {
+		if !eligibleSemanticNode(node) {
+			continue
+		}
 		if node.DirectText == "" && node.Href == "" && node.Src == "" && node.Alt == "" && node.Title == "" && node.AriaLabel == "" && len(node.Attributes) == 0 {
 			continue
 		}
