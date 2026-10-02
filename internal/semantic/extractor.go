@@ -281,14 +281,14 @@ func (e *Extractor) extractFields(ctx context.Context, page browser.DOMSnapshot,
 					return totalUsage, model, fmt.Errorf("Jev response is missing a valid answer for %s", name)
 				}
 				if answer.Choice == "none" {
-					output[itemIndex].Values[field.Name] = nil
+					storeFieldValue(output[itemIndex].Values, fields, field, nil, match.node.ID, byID, children, page.URL)
 					continue
 				}
 				value, ok := byID[answer.Choice]
 				if !ok {
 					return totalUsage, model, fmt.Errorf("Jev selected unknown DOM candidate %q for %s", answer.Choice, name)
 				}
-				output[itemIndex].Values[field.Name] = fieldValue(field.Description, value, page.URL)
+				storeFieldValue(output[itemIndex].Values, fields, field, &value, match.node.ID, byID, children, page.URL)
 			}
 		}
 	}
@@ -307,14 +307,15 @@ func (e *Extractor) extractFieldsFromRepresentative(ctx context.Context, page br
 		return usage, model, err
 	}
 	children := childIndex(page.Nodes)
+	byID := nodeIndex(page.Nodes)
 	for itemIndex := 1; itemIndex < len(matches); itemIndex++ {
 		for _, selector := range selectors {
 			node, ok := findFieldNode(matches[itemIndex].node.ID, selector, children)
 			if !ok {
-				output[itemIndex].Values[selector.field.Name] = nil
+				storeFieldValue(output[itemIndex].Values, fields, selector.field, nil, matches[itemIndex].node.ID, byID, children, page.URL)
 				continue
 			}
-			output[itemIndex].Values[selector.field.Name] = fieldValue(selector.field.Description, node, page.URL)
+			storeFieldValue(output[itemIndex].Values, fields, selector.field, &node, matches[itemIndex].node.ID, byID, children, page.URL)
 		}
 	}
 	return usage, model, nil
@@ -322,6 +323,7 @@ func (e *Extractor) extractFieldsFromRepresentative(ctx context.Context, page br
 
 func (e *Extractor) selectRepresentativeFields(ctx context.Context, page browser.DOMSnapshot, target string, fields []Field, representative browser.DOMNode, output Match) ([]fieldSelector, jev.Usage, string, error) {
 	children := childIndex(page.Nodes)
+	byID := nodeIndex(page.Nodes)
 	descendants := descendants(representative.ID, children)
 	if representative.DirectText != "" || representative.Href != "" || representative.Src != "" || representative.Alt != "" || representative.AriaLabel != "" || representative.Title != "" || len(representative.Attributes) > 0 {
 		descendants = append([]browser.DOMNode{representative}, descendants...)
@@ -349,9 +351,9 @@ func (e *Extractor) selectRepresentativeFields(ctx context.Context, page browser
 	if err != nil {
 		return nil, jev.Usage{}, "", fmt.Errorf("Jev representative field selection: %w", err)
 	}
-	byID := make(map[string]browser.DOMNode, len(fieldCandidates))
+	candidateByID := make(map[string]browser.DOMNode, len(fieldCandidates))
 	for _, node := range fieldCandidates {
-		byID[node.ID] = node
+		candidateByID[node.ID] = node
 	}
 	selectors := make([]fieldSelector, 0, len(fields))
 	for index, field := range fields {
@@ -361,14 +363,14 @@ func (e *Extractor) selectRepresentativeFields(ctx context.Context, page browser
 			return nil, response.Usage, response.Model, fmt.Errorf("Jev response is missing a valid answer for %s", name)
 		}
 		if answer.Choice == "none" {
-			output.Values[field.Name] = nil
+			storeFieldValue(output.Values, fields, field, nil, representative.ID, byID, children, page.URL)
 			continue
 		}
-		chosen, ok := byID[answer.Choice]
+		chosen, ok := candidateByID[answer.Choice]
 		if !ok {
 			return nil, response.Usage, response.Model, fmt.Errorf("Jev selected unknown DOM candidate %q for %s", answer.Choice, name)
 		}
-		output.Values[field.Name] = fieldValue(field.Description, chosen, page.URL)
+		storeFieldValue(output.Values, fields, field, &chosen, representative.ID, byID, children, page.URL)
 		rank := 0
 		for _, sibling := range fieldCandidates {
 			if sibling.Tag == chosen.Tag && normalizedClass(sibling.Class) == normalizedClass(chosen.Class) {
@@ -535,6 +537,90 @@ func childIndex(nodes []browser.DOMNode) map[string][]browser.DOMNode {
 		sort.Slice(children[parent], func(i, j int) bool { return children[parent][i].Order < children[parent][j].Order })
 	}
 	return children
+}
+
+func nodeIndex(nodes []browser.DOMNode) map[string]browser.DOMNode {
+	byID := make(map[string]browser.DOMNode, len(nodes))
+	for _, node := range nodes {
+		byID[node.ID] = node
+	}
+	return byID
+}
+
+func storeFieldValue(values map[string]any, fields []Field, field Field, selected *browser.DOMNode, recordID string, byID map[string]browser.DOMNode, children map[string][]browser.DOMNode, baseURL string) {
+	if selected == nil {
+		values[field.Name] = nil
+	} else {
+		values[field.Name] = fieldValue(field.Description, *selected, baseURL)
+	}
+	if key := companionURLKey(field, fields); key != "" {
+		if selected == nil {
+			values[key] = nil
+			return
+		}
+		if href := associatedLinkURL(recordID, *selected, byID, children); href != "" {
+			values[key] = absoluteURL(baseURL, href)
+		} else {
+			values[key] = nil
+		}
+	}
+}
+
+func companionURLKey(field Field, fields []Field) string {
+	if !containsAny(strings.ToLower(field.Name+" "+field.Description), "name", "title", "名前", "名称", "物件名", "商品名", "掲載名", "タイトル", "題名") {
+		return ""
+	}
+	key := field.Name + "_url"
+	for _, requested := range fields {
+		if requested.Name == key {
+			return ""
+		}
+	}
+	return key
+}
+
+// associatedLinkURL finds a link on the selected name node, inside it, or on
+// its nearest enclosing anchor. It deliberately stays within the matched
+// record and never follows the destination.
+func associatedLinkURL(recordID string, selected browser.DOMNode, byID map[string]browser.DOMNode, children map[string][]browser.DOMNode) string {
+	if selected.Href != "" {
+		return selected.Href
+	}
+	var firstAnchor string
+	for _, child := range descendants(selected.ID, children) {
+		if child.Tag != "a" || child.Href == "" {
+			continue
+		}
+		if firstAnchor == "" {
+			firstAnchor = child.Href
+		}
+		if linkTextMatches(selected.Text, child.Text) || linkTextMatches(selected.Text, child.DirectText) {
+			return child.Href
+		}
+	}
+	if firstAnchor != "" {
+		return firstAnchor
+	}
+	for id := selected.ParentID; id != ""; {
+		parent, ok := byID[id]
+		if !ok {
+			break
+		}
+		if parent.Tag == "a" && parent.Href != "" {
+			return parent.Href
+		}
+		if id == recordID {
+			break
+		}
+		id = parent.ParentID
+	}
+	return ""
+}
+
+func linkTextMatches(fieldText, linkText string) bool {
+	fieldText = strings.Join(strings.Fields(fieldText), " ")
+	linkText = strings.Join(strings.Fields(linkText), " ")
+	return len(fieldText) >= 2 && (fieldText == linkText || strings.Contains(linkText, fieldText) || strings.Contains(fieldText, linkText))
 }
 
 func descendants(id string, children map[string][]browser.DOMNode) []browser.DOMNode {
