@@ -142,8 +142,17 @@ by a reusable class could also include unrelated elements without verification.
 ### Decision
 1. Reuse the browser DOM snapshot and the existing Jev evaluator and field
    extraction interfaces. Include usable non-landmark containers in search.
-2. Group nodes locally by tag and the complete sorted class token set, independent
-   of class order or parent. Preserve complete class strings in the snapshot.
+2. Before grouping, skip unclassified `div` and `span` wrappers whose rendered
+   text exactly repeats their parent's text. Their text remains on the parent;
+   wrappers with direct text, classes, roles, or useful attributes remain
+   candidates. Group the remaining nodes by tag and the complete sorted class
+   token set, independent of class order or parent. Preserve complete class
+   strings in the snapshot.
+   The browser snapshot also omits empty unclassified `div`/`span` leaves and
+   `br`/`hr`/`wbr` separators; rendered text is collected from their surrounding
+   elements. This follows the wrapper-collapse idea used by
+   [mcprune](https://github.com/hamr0/mcprune), with a narrower rule for the
+   rendered DOM so repeated cards, tables, links, and field-bearing nodes stay intact.
 3. Evaluate group summaries in batches of 20 groups. Include counts and at most
    three samples spread across each group, with text and attributes, so opaque
    class names do not need to carry semantic meaning.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/longicorn/semcrawl/internal/browser"
 	"github.com/longicorn/semcrawl/jev"
@@ -12,13 +13,31 @@ import (
 // Group every usable node, including non-landmark containers. Keep the DOM
 // snapshot intact so field selection and ancestor traversal can reuse it.
 func groupedCandidates(nodes []browser.DOMNode) []candidate {
+	byID := make(map[string]browser.DOMNode, len(nodes))
+	for _, node := range nodes {
+		byID[node.ID] = node
+	}
 	out := make([]candidate, 0, len(nodes))
 	for _, node := range nodes {
-		if eligibleSemanticNode(node) && (usefulNodeText(node) || node.DirectText != "") {
+		if eligibleSemanticNode(node) && (usefulNodeText(node) || node.DirectText != "") && !redundantTextWrapper(node, byID) {
 			out = append(out, candidate{node: node})
 		}
 	}
 	return out
+}
+
+// Generic wrappers that repeat their parent's complete text add no useful
+// distinction to target matching. Keep their text on the parent snapshot and
+// retain wrappers with classes, direct text, or semantic attributes.
+func redundantTextWrapper(node browser.DOMNode, byID map[string]browser.DOMNode) bool {
+	if node.Tag != "div" && node.Tag != "span" {
+		return false
+	}
+	if node.Class != "" || node.Role != "" || node.AriaLabel != "" || node.DirectText != "" || node.Href != "" || node.Src != "" || node.Alt != "" || node.Title != "" || len(node.Attributes) > 0 {
+		return false
+	}
+	parent, ok := byID[node.ParentID]
+	return ok && strings.TrimSpace(node.Text) != "" && strings.TrimSpace(node.Text) == strings.TrimSpace(parent.Text)
 }
 
 type nodeGroup struct {
