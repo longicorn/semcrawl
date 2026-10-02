@@ -148,7 +148,9 @@ by a reusable class could also include unrelated elements without verification.
    three samples spread across each group, with text and attributes, so opaque
    class names do not need to carry semantic meaning.
 4. Verify every node in shortlisted groups against the target, in batches of 20
-   nodes. Sharing tag/class alone does not establish a record match.
+   nodes. Run independent group and node batches with at most two concurrent
+   Jev evaluations per client. Sharing tag/class alone does not establish a
+   record match.
 5. If no records match, evaluate field-bearing nodes in batches against the
    requested field descriptions and target. Retain all matching anchors, then
    evaluate deduplicated candidates starting at the anchors and proceeding to
@@ -160,6 +162,8 @@ by a reusable class could also include unrelated elements without verification.
 
 ### Consequences
 - Fewer sequential requests when many nodes share a small number of signatures.
+- Independent search batches overlap at a conservative concurrency of two;
+  Jev 429 and 529 responses are retried with exponential backoff.
 - Group summaries bound sample payload; verification prevents unconditional
   class-based expansion. Groups with unique utility class sets can remain costly.
 - Group samples can miss heterogeneous content. Bottom-up fallback recovers

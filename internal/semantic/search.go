@@ -47,6 +47,8 @@ func (e *Extractor) findGroupedMatches(ctx context.Context, page browser.DOMSnap
 	var selected []candidate
 	var total jev.Usage
 	model := ""
+	var batches [][]nodeGroup
+	var requests []jev.Request
 	for start := 0; start < len(groups); start += matchBatchSize {
 		batch := groups[start:min(start+matchBatchSize, len(groups))]
 		summaries := make([]map[string]any, 0, len(batch))
@@ -65,10 +67,14 @@ func (e *Extractor) findGroupedMatches(ctx context.Context, page browser.DOMSnap
 				Criteria:     map[string]any{"true": "This group plausibly contains requested records.", "false": "This group is unrelated or only contains wrappers."},
 			}
 		}
-		response, err := e.evaluator.Evaluate(ctx, jev.Request{State: map[string]any{"page": map[string]string{"title": page.Title}, "user_request": target, "groups": summaries}, Questions: questions})
-		if err != nil {
-			return nil, total, model, fmt.Errorf("Jev group selection: %w", err)
+		requests = append(requests, jev.Request{State: map[string]any{"page": map[string]string{"title": page.Title}, "user_request": target, "groups": summaries}, Questions: questions})
+		batches = append(batches, batch)
+	}
+	for index, result := range evaluateParallel(ctx, e.evaluator, requests) {
+		if result.err != nil {
+			return nil, total, model, fmt.Errorf("Jev group selection: %w", result.err)
 		}
+		response, batch := result.response, batches[index]
 		addUsage(&total, response.Usage)
 		if response.Model != "" {
 			model = response.Model
@@ -117,6 +123,8 @@ func (e *Extractor) findFromFields(ctx context.Context, page browser.DOMSnapshot
 	anchors := map[string]bool{}
 	var total jev.Usage
 	model := ""
+	var batches [][]browser.DOMNode
+	var requests []jev.Request
 	for start := 0; start < len(leaves); start += matchBatchSize {
 		batch := leaves[start:min(start+matchBatchSize, len(leaves))]
 		summaries := []map[string]any{}
@@ -125,10 +133,14 @@ func (e *Extractor) findFromFields(ctx context.Context, page browser.DOMSnapshot
 			summaries = append(summaries, describeNode(node))
 			questions["anchor_"+node.ID] = jev.Question{Type: jev.QuestionNoul, Instructions: fmt.Sprintf("Does element %s contain any requested field for a record matching %q? Use the field descriptions in state; reject unrelated page content.", node.ID, target), Criteria: map[string]any{"true": "This element contains a requested record field.", "false": "This element contains no relevant field."}}
 		}
-		response, err := e.evaluator.Evaluate(ctx, jev.Request{State: map[string]any{"page": map[string]string{"title": page.Title}, "user_request": target, "fields": fields, "field_candidates": summaries}, Questions: questions})
-		if err != nil {
-			return nil, total, model, fmt.Errorf("Jev field anchor selection: %w", err)
+		requests = append(requests, jev.Request{State: map[string]any{"page": map[string]string{"title": page.Title}, "user_request": target, "fields": fields, "field_candidates": summaries}, Questions: questions})
+		batches = append(batches, batch)
+	}
+	for index, result := range evaluateParallel(ctx, e.evaluator, requests) {
+		if result.err != nil {
+			return nil, total, model, fmt.Errorf("Jev field anchor selection: %w", result.err)
 		}
+		response, batch := result.response, batches[index]
 		addUsage(&total, response.Usage)
 		if response.Model != "" {
 			model = response.Model

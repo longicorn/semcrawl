@@ -13,11 +13,12 @@ import (
 )
 
 const (
-	matchBatchSize = 20
-	fieldBatchSize = 5
-	matchThreshold = 0.65
-	maxFields      = 12
-	maxChildren    = 30
+	matchBatchSize   = 20
+	matchParallelism = 2
+	fieldBatchSize   = 5
+	matchThreshold   = 0.65
+	maxFields        = 12
+	maxChildren      = 30
 )
 
 var ErrNoCandidates = errors.New("no usable DOM elements found on this page")
@@ -139,6 +140,8 @@ func (e *Extractor) findMatches(ctx context.Context, page browser.DOMSnapshot, t
 		usage = prior[0].(jev.Usage)
 		model = prior[1].(string)
 	}
+	var batches [][]candidate
+	var requests []jev.Request
 	for start := 0; start < len(candidates); start += matchBatchSize {
 		end := min(start+matchBatchSize, len(candidates))
 		batch := candidates[start:end]
@@ -153,7 +156,7 @@ func (e *Extractor) findMatches(ctx context.Context, page browser.DOMSnapshot, t
 				Criteria:     map[string]any{"true": "This element is one result matching the user's requested target.", "false": "This element is only a wrapper or does not match the requested target."},
 			}
 		}
-		response, err := e.evaluator.Evaluate(ctx, jev.Request{
+		requests = append(requests, jev.Request{
 			State: map[string]any{
 				"page":         map[string]string{"title": page.Title},
 				"user_request": target,
@@ -161,12 +164,17 @@ func (e *Extractor) findMatches(ctx context.Context, page browser.DOMSnapshot, t
 			},
 			Questions: questions,
 		})
-		if err != nil {
-			return nil, usage, model, fmt.Errorf("Jev target matching: %w", err)
+		batches = append(batches, batch)
+	}
+	for index, result := range evaluateParallel(ctx, e.evaluator, requests) {
+		if result.err != nil {
+			return nil, usage, model, fmt.Errorf("Jev target matching: %w", result.err)
 		}
-		usage.InputTokens += response.Usage.InputTokens
-		usage.OutputTokens += response.Usage.OutputTokens
-		model = response.Model
+		response, batch := result.response, batches[index]
+		addUsage(&usage, response.Usage)
+		if response.Model != "" {
+			model = response.Model
+		}
 		for _, item := range batch {
 			name := "match_" + item.node.ID
 			answer, ok := response.Answers[name]
