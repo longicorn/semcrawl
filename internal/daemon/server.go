@@ -129,6 +129,16 @@ func (s *Server) trackActivity(next http.Handler) http.Handler {
 		s.mu.Lock()
 		s.lastRequest = time.Now()
 		s.mu.Unlock()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				// Keep an unexpected handler panic from appearing to clients as a
+				// bare EOF. Handlers normally write only after their work succeeds,
+				// so this returns a useful error response for failures during work.
+				writeJSON(w, http.StatusInternalServerError, map[string]string{
+					"error": fmt.Sprintf("daemon handler panic: %v", recovered),
+				})
+			}
+		}()
 		next.ServeHTTP(w, r)
 	})
 }

@@ -126,28 +126,43 @@ func (f *repeatedFlag) Set(value string) error {
 
 func runExtract(args []string, stdout, stderr io.Writer) error {
 	if len(args) < 1 {
-		return errors.New("usage: semcrawl extract <session_id> --target <description> --field <name=description> [--field ...] [--limit n]")
+		return errors.New("usage: semcrawl extract <session_id> --target <description> [--field name=description ...] [--fields name=description ...] [--ancestor-depth n] [--limit n]")
 	}
 	sessionID := args[0]
 	flags := flag.NewFlagSet("extract", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	target := flags.String("target", "", "natural language description of the elements to find")
 	limit := flags.Int("limit", 20, "maximum number of matching items")
-	var fields repeatedFlag
-	flags.Var(&fields, "field", "output field as name=natural language description; repeat as needed")
+	depth := flags.Int("ancestor-depth", 3, "maximum parent levels searched for repeated fields (1-8)")
+	var fields, multiFields repeatedFlag
+	flags.Var(&fields, "field", "single output field as name=description; repeat as needed")
+	flags.Var(&multiFields, "fields", "repeated row fields as name=description; repeat as needed")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("unexpected arguments; use --target and --field")
+		return errors.New("unexpected arguments; use --target, --field, and/or --fields")
 	}
-	parsedFields := make([]semantic.Field, 0, len(fields))
+	if *depth < 1 || *depth > 8 {
+		return errors.New("ancestor-depth must be between 1 and 8")
+	}
+	parsedFields := make([]semantic.Field, 0, len(fields)+len(multiFields))
 	for _, raw := range fields {
 		name, description, ok := strings.Cut(raw, "=")
 		if !ok || strings.TrimSpace(name) == "" || strings.TrimSpace(description) == "" {
 			return fmt.Errorf("invalid field %q: expected name=description", raw)
 		}
 		parsedFields = append(parsedFields, semantic.Field{Name: strings.TrimSpace(name), Description: strings.TrimSpace(description)})
+	}
+	for _, raw := range multiFields {
+		name, description, ok := strings.Cut(raw, "=")
+		if !ok || strings.TrimSpace(name) == "" || strings.TrimSpace(description) == "" {
+			return fmt.Errorf("invalid repeated field %q: expected name=description", raw)
+		}
+		parsedFields = append(parsedFields, semantic.Field{Name: strings.TrimSpace(name), Description: strings.TrimSpace(description), Multiple: true, AncestorDepth: *depth})
+	}
+	if len(parsedFields) == 0 {
+		return errors.New("provide at least one --field or --fields")
 	}
 	client, err := newDaemonClient()
 	if err != nil {
@@ -278,5 +293,5 @@ func encode(w io.Writer, value any) error {
 }
 
 func usageError() error {
-	return errors.New("usage: semcrawl open | goto <session_id> <url> | content <session_id> | extract <session_id> --target <description> --field <name=description> | close <session_id> | session list | daemon start|status|stop | scrape <url>")
+	return errors.New("usage: semcrawl open | goto <session_id> <url> | content <session_id> | extract <session_id> --target <description> [--field name=description] [--fields name=description] | close <session_id> | session list | daemon start|status|stop | scrape <url>")
 }

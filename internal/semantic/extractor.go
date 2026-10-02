@@ -29,8 +29,10 @@ type Evaluator interface {
 }
 
 type Field struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	Multiple      bool   `json:"multiple,omitempty"`
+	AncestorDepth int    `json:"ancestor_depth,omitempty"`
 }
 
 type Match struct {
@@ -142,6 +144,9 @@ func Validate(target string, fields []Field, limit int) error {
 		}
 		if seen[name] {
 			return fmt.Errorf("duplicate field name %q", name)
+		}
+		if field.Multiple && (field.AncestorDepth < 1 || field.AncestorDepth > 8) {
+			return errors.New("repeated field ancestor depth must be between 1 and 8")
 		}
 		seen[name] = true
 	}
@@ -302,6 +307,40 @@ type fieldSelector struct {
 }
 
 func (e *Extractor) extractFieldsFromRepresentative(ctx context.Context, page browser.DOMSnapshot, target string, fields []Field, matches []candidate, output []Match) (jev.Usage, string, error) {
+	var scalar, multiple []Field
+	for _, field := range fields {
+		if field.Multiple {
+			multiple = append(multiple, field)
+		} else {
+			scalar = append(scalar, field)
+		}
+	}
+	var total jev.Usage
+	model := ""
+	if len(scalar) > 0 {
+		u, m, err := e.extractScalarFields(ctx, page, target, scalar, matches, output)
+		addUsage(&total, u)
+		if m != "" {
+			model = m
+		}
+		if err != nil {
+			return total, model, err
+		}
+	}
+	if len(multiple) > 0 {
+		u, m, err := e.extractMultipleFields(ctx, page, target, multiple, fields, matches, output)
+		addUsage(&total, u)
+		if m != "" {
+			model = m
+		}
+		if err != nil {
+			return total, model, err
+		}
+	}
+	return total, model, nil
+}
+
+func (e *Extractor) extractScalarFields(ctx context.Context, page browser.DOMSnapshot, target string, fields []Field, matches []candidate, output []Match) (jev.Usage, string, error) {
 	selectors, usage, model, err := e.selectRepresentativeFields(ctx, page, target, fields, matches[0].node, output[0])
 	if err != nil {
 		return usage, model, err
@@ -321,14 +360,145 @@ func (e *Extractor) extractFieldsFromRepresentative(ctx context.Context, page br
 	return usage, model, nil
 }
 
+func (e *Extractor) extractMultipleFields(ctx context.Context, page browser.DOMSnapshot, target string, multiple, all []Field, matches []candidate, output []Match) (jev.Usage, string, error) {
+	children, byID := childIndex(page.Nodes), nodeIndex(page.Nodes)
+	depth := 3
+	for _, field := range multiple {
+		if field.AncestorDepth > 0 && field.AncestorDepth > depth {
+			depth = field.AncestorDepth
+		}
+	}
+	root := expandMultiRoot(matches[0].node, depth, byID, children, all, output[0].Values)
+	temp := Match{Values: map[string]any{}}
+	selectors, usage, model, err := e.selectRepresentativeFields(ctx, page, target, multiple, root, temp)
+	if err != nil {
+		return usage, model, err
+	}
+	selected := make([]browser.DOMNode, 0, len(selectors))
+	for _, selector := range selectors {
+		selected = append(selected, selector.node)
+	}
+	row := commonAncestor(selected, byID)
+	rows := []browser.DOMNode{row}
+	if row.ID != "" {
+		rows = rows[:0]
+		for _, node := range descendants(root.ID, children) {
+			if node.Tag == row.Tag && normalizedClass(node.Class) == normalizedClass(row.Class) {
+				rows = append(rows, node)
+			}
+		}
+		if len(rows) == 0 {
+			rows = []browser.DOMNode{row}
+		}
+	}
+	for itemIndex, match := range matches {
+		itemRoot := expandMultiRoot(match.node, depth, byID, children, all, output[itemIndex].Values)
+		itemRows := rows
+		if itemIndex > 0 && row.ID != "" {
+			itemRows = itemRows[:0]
+			for _, node := range descendants(itemRoot.ID, children) {
+				if node.Tag == row.Tag && normalizedClass(node.Class) == normalizedClass(row.Class) {
+					itemRows = append(itemRows, node)
+				}
+			}
+		}
+		values := make([]any, 0, len(itemRows))
+		for _, rowNode := range itemRows {
+			entry := map[string]any{}
+			for _, selector := range selectors {
+				local := selector
+				local.rank = rankInRoot(row, selector.node, children)
+				node, ok := browser.DOMNode{}, false
+				if rowNode.Tag == selector.node.Tag && normalizedClass(rowNode.Class) == normalizedClass(selector.node.Class) {
+					node, ok = rowNode, true
+				} else {
+					node, ok = findFieldNode(rowNode.ID, local, children)
+				}
+				if !ok {
+					entry[selector.field.Name] = nil
+					continue
+				}
+				entry[selector.field.Name] = fieldValue(selector.field.Description, node, page.URL)
+			}
+			values = append(values, entry)
+		}
+		output[itemIndex].Values["rows"] = values
+	}
+	return usage, model, nil
+}
+
+func expandMultiRoot(node browser.DOMNode, maxDepth int, byID map[string]browser.DOMNode, children map[string][]browser.DOMNode, fields []Field, values map[string]any) browser.DOMNode {
+	name := ""
+	for _, field := range fields {
+		if !field.Multiple && containsAny(strings.ToLower(field.Name+" "+field.Description), "name", "title", "名前", "名称", "物件名", "商品名", "タイトル") {
+			if v, ok := values[field.Name].(string); ok {
+				name = v
+				break
+			}
+		}
+	}
+	root := node
+	for i := 0; i < maxDepth && root.ParentID != ""; i++ {
+		parent, ok := byID[root.ParentID]
+		if !ok {
+			break
+		}
+		if name != "" && strings.Count(parent.Text, name) > 1 {
+			break
+		}
+		root = parent
+	}
+	return root
+}
+
+func commonAncestor(nodes []browser.DOMNode, byID map[string]browser.DOMNode) browser.DOMNode {
+	if len(nodes) == 0 {
+		return browser.DOMNode{}
+	}
+	if len(nodes) == 1 {
+		return nodes[0]
+	}
+	ancestors := map[string]bool{}
+	for n := nodes[0]; n.ID != ""; n = byID[n.ParentID] {
+		ancestors[n.ID] = true
+	}
+	for n := nodes[1]; n.ID != ""; n = byID[n.ParentID] {
+		if ancestors[n.ID] {
+			return n
+		}
+	}
+	return browser.DOMNode{}
+}
+
+func rankInRoot(root, selected browser.DOMNode, children map[string][]browser.DOMNode) int {
+	rank := 0
+	for _, node := range descendants(root.ID, children) {
+		if node.Tag == selected.Tag && normalizedClass(node.Class) == normalizedClass(selected.Class) {
+			if node.ID == selected.ID {
+				return rank
+			}
+			rank++
+		}
+	}
+	return 0
+}
+
 func (e *Extractor) selectRepresentativeFields(ctx context.Context, page browser.DOMSnapshot, target string, fields []Field, representative browser.DOMNode, output Match) ([]fieldSelector, jev.Usage, string, error) {
 	children := childIndex(page.Nodes)
 	byID := nodeIndex(page.Nodes)
 	descendants := descendants(representative.ID, children)
+	candidateLimit := maxChildren
+	for _, field := range fields {
+		if field.Multiple {
+			descendants = descendantsLimit(representative.ID, children, 5000)
+			candidateLimit = 120
+			break
+		}
+	}
 	if representative.DirectText != "" || representative.Href != "" || representative.Src != "" || representative.Alt != "" || representative.AriaLabel != "" || representative.Title != "" || len(representative.Attributes) > 0 {
 		descendants = append([]browser.DOMNode{representative}, descendants...)
 	}
-	fieldCandidates := selectFieldCandidates(descendants)
+	fieldCandidates := selectFieldCandidatesLimit(descendants, candidateLimit)
 	choiceNodes := make([]map[string]any, 0, len(fieldCandidates))
 	options := make(map[string]any, len(fieldCandidates)+1)
 	for _, node := range fieldCandidates {
@@ -338,9 +508,13 @@ func (e *Extractor) selectRepresentativeFields(ctx context.Context, page browser
 	options["none"] = "No element in this item contains the requested field."
 	questions := make(map[string]jev.Question, len(fields))
 	for index, field := range fields {
+		instructions := fmt.Sprintf("For the representative record found as %q, select the descendant DOM element that contains the requested field %q. Choose none if unavailable.", target, field.Description)
+		if field.Multiple {
+			instructions = fmt.Sprintf("For the first repeated row within the record found as %q, select the element containing repeated field %q. Prefer the first matching row and do not select a value from another record.", target, field.Description)
+		}
 		questions[fmt.Sprintf("field_%s_%d", representative.ID, index)] = jev.Question{
 			Type:         jev.QuestionChoice,
-			Instructions: fmt.Sprintf("For the representative record found as %q, select the descendant DOM element that contains the requested field %q. Choose none if unavailable.", target, field.Description),
+			Instructions: instructions,
 			Criteria:     options,
 		}
 	}
@@ -387,6 +561,11 @@ func (e *Extractor) selectRepresentativeFields(ctx context.Context, page browser
 
 func findFieldNode(itemID string, selector fieldSelector, children map[string][]browser.DOMNode) (browser.DOMNode, bool) {
 	descendants := descendants(itemID, children)
+	for _, node := range descendants {
+		if node.ID == itemID && node.Tag == selector.node.Tag && normalizedClass(node.Class) == normalizedClass(selector.node.Class) {
+			return node, true
+		}
+	}
 	var samePattern []browser.DOMNode
 	for _, node := range descendants {
 		if node.Tag == selector.node.Tag && normalizedClass(node.Class) == normalizedClass(selector.node.Class) {
@@ -624,11 +803,15 @@ func linkTextMatches(fieldText, linkText string) bool {
 }
 
 func descendants(id string, children map[string][]browser.DOMNode) []browser.DOMNode {
+	return descendantsLimit(id, children, maxChildren)
+}
+
+func descendantsLimit(id string, children map[string][]browser.DOMNode, limit int) []browser.DOMNode {
 	out := make([]browser.DOMNode, 0, maxChildren)
 	var walk func(string)
 	walk = func(parent string) {
 		for _, child := range children[parent] {
-			if len(out) >= maxChildren {
+			if len(out) >= limit {
 				return
 			}
 			out = append(out, child)
@@ -640,7 +823,11 @@ func descendants(id string, children map[string][]browser.DOMNode) []browser.DOM
 }
 
 func selectFieldCandidates(nodes []browser.DOMNode) []browser.DOMNode {
-	out := make([]browser.DOMNode, 0, maxChildren)
+	return selectFieldCandidatesLimit(nodes, maxChildren)
+}
+
+func selectFieldCandidatesLimit(nodes []browser.DOMNode, limit int) []browser.DOMNode {
+	out := make([]browser.DOMNode, 0, min(limit, len(nodes)))
 	for _, node := range nodes {
 		if !eligibleSemanticNode(node) {
 			continue
@@ -649,7 +836,7 @@ func selectFieldCandidates(nodes []browser.DOMNode) []browser.DOMNode {
 			continue
 		}
 		out = append(out, node)
-		if len(out) == maxChildren {
+		if len(out) == limit {
 			break
 		}
 	}

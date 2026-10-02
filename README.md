@@ -70,6 +70,8 @@ go run ./cmd/semcrawl extract "$SESSION_ID" \
   --target "links to documentation pages" \
   --field label="the visible link text" \
   --field url="the destination URL" \
+  --fields detail="the visible text of each detail link" \
+  --fields detail_url="the destination URL for each detail link" \
   --limit 20
 go run ./cmd/semcrawl close "$SESSION_ID"
 ```
@@ -85,6 +87,13 @@ fields can be requested. For name or title fields such as
 selected name element has a link, contains a link, or is inside a link. Relative
 links are resolved against the current page URL; Semcrawl does not open the
 destination.
+
+Use repeatable `--fields name=description` for values that repeat inside one
+record, such as room rows within a building. These fields are returned together
+as `values.rows`, an array of objects. Semcrawl searches up to three ancestor
+levels by default to include sibling branches; set `--ancestor-depth` from 1 to
+8 to change that limit. It stops before including an ancestor whose text repeats
+the selected single `--field` name more than once.
 
 Extraction first groups usable DOM nodes by tag and the complete, sorted class
 set. Jev evaluates group summaries with up to three samples, then verifies the

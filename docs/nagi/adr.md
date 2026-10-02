@@ -182,3 +182,32 @@ by a reusable class could also include unrelated elements without verification.
 - Mocked tests compare request counts and serialized payload sizes, verify
   unrelated nodes are rejected, and cover shared ancestors at differing depths.
   Real API latency and classification accuracy require live-page measurement.
+
+## ADR-006: Repeated Fields Within a Matched Record
+
+### Status
+Accepted
+
+### Context
+Some result records contain a scalar parent section and a repeated sibling
+region, such as one building with multiple room rows. Representative field
+selection from only the matched node can omit those sibling rows or collapse
+them into one value.
+
+### Decision
+1. Keep `--field name=description` for one value per matched record and add
+   repeatable `--fields name=description` for values that belong to repeated
+   sibling regions.
+2. Return repeated fields together as `values.rows`, an ordered array of
+   objects, while preserving the outer matched record and its scalar values.
+3. Permit a bounded ancestor search to include sibling branches. The default
+   depth is 3 and `--ancestor-depth` accepts values from 1 to 8. Stop before an
+   ancestor whose text contains the selected scalar name more than once.
+
+### Consequences
+- Building fields remain scalar while room-row fields stay grouped together.
+- The repeated region is inferred from the selected fields' common DOM
+  ancestor and repeated tag/class signature; unusual markup may need a depth
+  adjustment or more descriptive fields.
+- A repeated item without a selected scalar name uses the configured depth
+  limit as its boundary.

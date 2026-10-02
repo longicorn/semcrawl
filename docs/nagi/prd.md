@@ -195,3 +195,13 @@ bottom-up ancestor search if no target records match. Reuse the DOM snapshot,
 Jev client, and representative field extraction. Preserve output ordering and
 usage reporting. The hierarchical query and interaction interfaces above remain
 separate requirements; this update changes the current extraction search only.
+
+## 9. Repeated Fields Within a Matched Record
+
+The `extract` command distinguishes scalar `--field` values from repeated
+`--fields` values. Repeated fields are grouped by their repeated DOM region and
+returned as objects in `values.rows` for each matched record. Searching may
+climb a bounded number of ancestors to include sibling DOM branches; the
+default depth is 3 and `--ancestor-depth` accepts 1 through 8. Climbing stops
+before an ancestor containing the selected scalar name more than once, so
+adjacent records are not merged.

@@ -13,7 +13,10 @@ go run ./cmd/semcrawl extract <session_id> \
   --target "product cards" \
   --field name="product name" \
   --field price="price" \
-  --field url="product page link"
+  --fields floor="room floor" \
+  --fields rent="room rent" \
+  --fields detail_url="destination URL of the 詳細を見る link" \
+  --ancestor-depth 3
 go run ./cmd/semcrawl close <session_id>
 ```
 
@@ -37,6 +40,12 @@ score per item, along with the model and reported token usage.
 For name or title fields, the values object also includes `<field>_url` when a
 link is attached to the selected element, nested inside it, or wraps it. Relative
 URLs are resolved against the page URL, and the destination is not opened.
+
+`--field` selects one value per matched item. Repeatable `--fields` selects
+values from repeated sibling regions and returns them as `values.rows`, an
+array of objects. The default ancestor search depth is 3; `--ancestor-depth`
+accepts values from 1 to 8. Search stops before an ancestor that contains the
+selected single name more than once.
 
 The daemon uses a Unix domain socket at `$XDG_RUNTIME_DIR/semcrawl.sock`, or
 `<user config directory>/semcrawl/semcrawl.sock` when that environment variable
