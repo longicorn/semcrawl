@@ -205,3 +205,10 @@ climb a bounded number of ancestors to include sibling DOM branches; the
 default depth is 3 and `--ancestor-depth` accepts 1 through 8. Climbing stops
 before an ancestor containing the selected scalar name more than once, so
 adjacent records are not merged.
+
+When the caller knows stable visible text, `--anchor-text` locates exact text
+matches before semantic record search. Each match maps to its nearest list item
+or article as a record root. Matching `--fields` values and link URL fields use
+the exact anchor node directly; Jev remains available for less explicit field
+descriptions. `--target` is optional when an anchor is supplied and then serves
+as context for semantic field selection.

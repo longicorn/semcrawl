@@ -211,3 +211,30 @@ them into one value.
   adjustment or more descriptive fields.
 - A repeated item without a selected scalar name uses the configured depth
   limit as its boundary.
+
+## ADR-007: Exact Text Anchors for Record Discovery
+
+### Status
+Accepted
+
+### Context
+Broad semantic targets can match both complete records and their nested
+children. Pages often expose a stable, explicit text such as a detail-link
+label that identifies the relevant record region more reliably than a
+semantic guess.
+
+### Decision
+1. Add optional `--anchor-text` for exact visible-text matching. When supplied,
+   use each match's nearest list-item or article ancestor as the record root
+   and deduplicate roots before field extraction.
+2. Use fields whose descriptions match the anchor text, and requested link URL
+   fields, directly from the matched anchor node. Use Jev for less explicit
+   fields within the chosen record root.
+3. Keep `--target` as optional semantic context when `--anchor-text` is present;
+   without an anchor, retain the existing semantic record search.
+
+### Consequences
+- Exact text anchors bypass broad semantic candidate matching and reduce
+  accidental child-node records.
+- Pages without list-item or article wrappers fall back to the exact matching
+  node as the record root; callers may need semantic search for other layouts.

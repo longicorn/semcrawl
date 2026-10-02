@@ -126,12 +126,13 @@ func (f *repeatedFlag) Set(value string) error {
 
 func runExtract(args []string, stdout, stderr io.Writer) error {
 	if len(args) < 1 {
-		return errors.New("usage: semcrawl extract <session_id> --target <description> [--field name=description ...] [--fields name=description ...] [--ancestor-depth n] [--limit n]")
+		return errors.New("usage: semcrawl extract <session_id> (--target <description> | --anchor-text <exact text>) [--field name=description ...] [--fields name=description ...] [--ancestor-depth n] [--limit n]")
 	}
 	sessionID := args[0]
 	flags := flag.NewFlagSet("extract", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	target := flags.String("target", "", "natural language description of the elements to find")
+	anchorText := flags.String("anchor-text", "", "exact visible text used to locate record roots")
 	limit := flags.Int("limit", 20, "maximum number of matching items")
 	depth := flags.Int("ancestor-depth", 3, "maximum parent levels searched for repeated fields (1-8)")
 	var fields, multiFields repeatedFlag
@@ -141,7 +142,7 @@ func runExtract(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("unexpected arguments; use --target, --field, and/or --fields")
+		return errors.New("unexpected arguments; use --target and/or --anchor-text with --field and/or --fields")
 	}
 	if *depth < 1 || *depth > 8 {
 		return errors.New("ancestor-depth must be between 1 and 8")
@@ -164,12 +165,15 @@ func runExtract(args []string, stdout, stderr io.Writer) error {
 	if len(parsedFields) == 0 {
 		return errors.New("provide at least one --field or --fields")
 	}
+	if strings.TrimSpace(*target) == "" && strings.TrimSpace(*anchorText) == "" {
+		return errors.New("provide --target or --anchor-text")
+	}
 	client, err := newDaemonClient()
 	if err != nil {
 		return err
 	}
 	var result map[string]any
-	request := map[string]any{"target": *target, "fields": parsedFields, "limit": *limit}
+	request := map[string]any{"target": *target, "anchor_text": *anchorText, "fields": parsedFields, "limit": *limit}
 	if err := client.Call(context.Background(), http.MethodPost, "/sessions/"+sessionID+"/extract", request, &result); err != nil {
 		return err
 	}
@@ -293,5 +297,5 @@ func encode(w io.Writer, value any) error {
 }
 
 func usageError() error {
-	return errors.New("usage: semcrawl open | goto <session_id> <url> | content <session_id> | extract <session_id> --target <description> [--field name=description] [--fields name=description] | close <session_id> | session list | daemon start|status|stop | scrape <url>")
+	return errors.New("usage: semcrawl open | goto <session_id> <url> | content <session_id> | extract <session_id> (--target <description> | --anchor-text <exact text>) [--field name=description] [--fields name=description] | close <session_id> | session list | daemon start|status|stop | scrape <url>")
 }

@@ -11,11 +11,11 @@ go run ./cmd/semcrawl goto <session_id> https://example.com
 go run ./cmd/semcrawl content <session_id>
 go run ./cmd/semcrawl extract <session_id> \
   --target "product cards" \
+  --anchor-text "View details" \
   --field name="product name" \
   --field price="price" \
-  --fields floor="room floor" \
-  --fields rent="room rent" \
-  --fields detail_url="destination URL of the 詳細を見る link" \
+  --fields label="View details" \
+  --fields detail_url="destination URL" \
   --ancestor-depth 3
 go run ./cmd/semcrawl close <session_id>
 ```
@@ -41,11 +41,15 @@ For name or title fields, the values object also includes `<field>_url` when a
 link is attached to the selected element, nested inside it, or wraps it. Relative
 URLs are resolved against the page URL, and the destination is not opened.
 
-`--field` selects one value per matched item. Repeatable `--fields` selects
-values from repeated sibling regions and returns them as `values.rows`, an
-array of objects. The default ancestor search depth is 3; `--ancestor-depth`
-accepts values from 1 to 8. Search stops before an ancestor that contains the
-selected single name more than once.
+`--anchor-text` locates exact visible text first and uses its nearest list item
+or article as the record root. In this mode `--target` is optional and provides
+context for Jev-selected fields. A `--fields` description equal to the anchor
+text uses the exact matched node directly; URL fields use the matched anchor's
+`href`. Repeatable `--fields` selects repeated values and returns them together
+as `values.rows`, an array of objects. Without `--anchor-text`, the default
+ancestor search depth is 3; `--ancestor-depth` accepts values from 1 to 8 and
+search stops before an ancestor that contains the selected single name more
+than once.
 
 The daemon uses a Unix domain socket at `$XDG_RUNTIME_DIR/semcrawl.sock`, or
 `<user config directory>/semcrawl/semcrawl.sock` when that environment variable
