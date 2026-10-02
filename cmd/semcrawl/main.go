@@ -126,22 +126,31 @@ func (f *repeatedFlag) Set(value string) error {
 
 func runExtract(args []string, stdout, stderr io.Writer) error {
 	if len(args) < 1 {
-		return errors.New("usage: semcrawl extract <session_id> --target <description> --field <name=description> [--field ...] [--limit n]")
+		return errors.New("usage: semcrawl extract <session_id> (--target <description> | --anchor-text <exact text>) [--field name=description ...] [--fields name=description ...] [--table name --table-column name=header ...] [--limit n]")
 	}
 	sessionID := args[0]
 	flags := flag.NewFlagSet("extract", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	target := flags.String("target", "", "natural language description of the elements to find")
+	anchorText := flags.String("anchor-text", "", "exact visible text used to locate record roots")
 	limit := flags.Int("limit", 20, "maximum number of matching items")
-	var fields repeatedFlag
-	flags.Var(&fields, "field", "output field as name=natural language description; repeat as needed")
+	depth := flags.Int("ancestor-depth", 3, "maximum parent levels searched for repeated fields (1-8)")
+	var fields, multiFields repeatedFlag
+	flags.Var(&fields, "field", "single output field as name=description; repeat as needed")
+	flags.Var(&multiFields, "fields", "repeated row fields as name=description; repeat as needed")
+	var tableNames, tableColumns repeatedFlag
+	flags.Var(&tableNames, "table", "table output name; repeat for each table")
+	flags.Var(&tableColumns, "table-column", "table header as table_name=header; repeat for each table column")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("unexpected arguments; use --target and --field")
+		return errors.New("unexpected arguments; use --target and/or --anchor-text with --field and/or --fields")
 	}
-	parsedFields := make([]semantic.Field, 0, len(fields))
+	if *depth < 1 || *depth > 8 {
+		return errors.New("ancestor-depth must be between 1 and 8")
+	}
+	parsedFields := make([]semantic.Field, 0, len(fields)+len(multiFields))
 	for _, raw := range fields {
 		name, description, ok := strings.Cut(raw, "=")
 		if !ok || strings.TrimSpace(name) == "" || strings.TrimSpace(description) == "" {
@@ -149,12 +158,54 @@ func runExtract(args []string, stdout, stderr io.Writer) error {
 		}
 		parsedFields = append(parsedFields, semantic.Field{Name: strings.TrimSpace(name), Description: strings.TrimSpace(description)})
 	}
+	for _, raw := range multiFields {
+		name, description, ok := strings.Cut(raw, "=")
+		if !ok || strings.TrimSpace(name) == "" || strings.TrimSpace(description) == "" {
+			return fmt.Errorf("invalid repeated field %q: expected name=description", raw)
+		}
+		parsedFields = append(parsedFields, semantic.Field{Name: strings.TrimSpace(name), Description: strings.TrimSpace(description), Multiple: true, AncestorDepth: *depth})
+	}
+	tablesByName := map[string]*semantic.TableSpec{}
+	orderedTables := make([]semantic.TableSpec, 0, len(tableNames))
+	for _, name := range tableNames {
+		name = strings.TrimSpace(name)
+		if name == "" || tablesByName[name] != nil {
+			return fmt.Errorf("invalid or duplicate --table name %q", name)
+		}
+		table := &semantic.TableSpec{Name: name}
+		tablesByName[name] = table
+		orderedTables = append(orderedTables, *table)
+	}
+	for _, raw := range tableColumns {
+		name, header, ok := strings.Cut(raw, "=")
+		name, header = strings.TrimSpace(name), strings.TrimSpace(header)
+		if !ok || name == "" || header == "" {
+			return fmt.Errorf("invalid --table-column %q: expected table_name=header", raw)
+		}
+		table := tablesByName[name]
+		if table == nil {
+			return fmt.Errorf("--table-column refers to undeclared table %q", name)
+		}
+		table.Columns = append(table.Columns, header)
+	}
+	for i := range orderedTables {
+		orderedTables[i] = *tablesByName[orderedTables[i].Name]
+	}
+	if len(parsedFields) == 0 && len(orderedTables) == 0 {
+		return errors.New("provide at least one --field, --fields, or --table")
+	}
+	if err := semantic.ValidateTables(orderedTables); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*target) == "" && strings.TrimSpace(*anchorText) == "" {
+		return errors.New("provide --target or --anchor-text")
+	}
 	client, err := newDaemonClient()
 	if err != nil {
 		return err
 	}
 	var result map[string]any
-	request := map[string]any{"target": *target, "fields": parsedFields, "limit": *limit}
+	request := map[string]any{"target": *target, "anchor_text": *anchorText, "fields": parsedFields, "tables": orderedTables, "limit": *limit}
 	if err := client.Call(context.Background(), http.MethodPost, "/sessions/"+sessionID+"/extract", request, &result); err != nil {
 		return err
 	}
@@ -278,5 +329,5 @@ func encode(w io.Writer, value any) error {
 }
 
 func usageError() error {
-	return errors.New("usage: semcrawl open | goto <session_id> <url> | content <session_id> | extract <session_id> --target <description> --field <name=description> | close <session_id> | session list | daemon start|status|stop | scrape <url>")
+	return errors.New("usage: semcrawl open | goto <session_id> <url> | content <session_id> | extract <session_id> (--target <description> | --anchor-text <exact text>) [--field name=description] [--fields name=description] | close <session_id> | session list | daemon start|status|stop | scrape <url>")
 }

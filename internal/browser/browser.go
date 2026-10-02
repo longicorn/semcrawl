@@ -30,6 +30,7 @@ type DOMNode struct {
 	Src        string            `json:"src,omitempty"`
 	Alt        string            `json:"alt,omitempty"`
 	Title      string            `json:"title,omitempty"`
+	HTML       string            `json:"html,omitempty"`
 	Attributes map[string]string `json:"attributes,omitempty"`
 }
 
@@ -148,6 +149,7 @@ func (t *chromeTab) DOMSnapshot(ctx context.Context) (DOMSnapshot, error) {
       text: clean(el.innerText || (el.namespaceURI === "http://www.w3.org/2000/svg" ? el.textContent : "")).slice(0, 700),
       direct_text: clean(direct).slice(0, 300),
       href: typeof el.href === "string" ? (el.href || "") : (el.getAttribute("href") || ""),
+      html: /^(td|th)$/.test(el.tagName.toLowerCase()) ? el.outerHTML.slice(0, 8000) : "",
       src: el.currentSrc || (typeof el.src === "string" ? (el.src || "") : (el.getAttribute("src") || "")),
       alt: el.getAttribute("alt") || "", title: el.getAttribute("title") || "",
       attributes: (() => {

@@ -67,14 +67,23 @@ SESSION_ID="paste-session-id-here"
 go run ./cmd/semcrawl goto "$SESSION_ID" https://example.com
 go run ./cmd/semcrawl content "$SESSION_ID"
 go run ./cmd/semcrawl extract "$SESSION_ID" \
-  --target "links to documentation pages" \
+  --anchor-text "Learn more" \
+  --target "documentation page cards" \
   --field label="the visible link text" \
   --field url="the destination URL" \
+  --fields detail="Learn more" \
+  --fields detail_url="the destination URL" \
+  --table rooms \
+  --table-column rooms="Floor" \
+  --table-column rooms="Rent/Management fee" \
   --limit 20
 go run ./cmd/semcrawl close "$SESSION_ID"
 ```
 
-The `--target` value describes the records to find. Each `--field` is written
+`--target` describes records for semantic extraction. `--anchor-text` instead
+provides exact visible text to locate first; each matching link is mapped to its
+nearest list item or article as a record root. When it is present, `--target` is
+optional and acts as context for Jev-selected fields. Each `--field` is written
 as `name=description`: the name becomes the JSON key, and the description tells
 Jev what value to select. The response includes an `items` array; each item has
 a `node_id`, a match `score`, and a `values` object. The response also reports
@@ -85,6 +94,24 @@ fields can be requested. For name or title fields such as
 selected name element has a link, contains a link, or is inside a link. Relative
 links are resolved against the current page URL; Semcrawl does not open the
 destination.
+
+Use repeatable `--fields name=description` for values that repeat inside one
+record, such as room rows within a building. These fields are returned together
+as `values.rows`, an array of objects. When the field description exactly
+matches `--anchor-text`, Semcrawl uses that exact text node directly rather
+than asking Jev to choose it. Without `--anchor-text`, repeated fields may
+search up to three ancestor levels by default; `--ancestor-depth` changes that
+limit from 1 to 8 and stops before an ancestor whose text repeats the selected
+single `--field` name more than once.
+
+Use `--table name` with repeatable `--table-column name=header` to return a
+whole table selected by its headers. Each named table is located separately
+within every matched record, so one record can return multiple tables. A table
+must contain all specified header texts; if multiple tables match the same
+name within one record, extraction reports an ambiguity error. Each
+`values.<name>` contains `headers` and ordered `rows`; every cell includes its
+visible `text`, original cell `html`, and matching `header` where available.
+Table extraction can be used without `--field` or `--fields`.
 
 Extraction first groups usable DOM nodes by tag and the complete, sorted class
 set. Jev evaluates group summaries with up to three samples, then verifies the

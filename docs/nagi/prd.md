@@ -195,3 +195,27 @@ bottom-up ancestor search if no target records match. Reuse the DOM snapshot,
 Jev client, and representative field extraction. Preserve output ordering and
 usage reporting. The hierarchical query and interaction interfaces above remain
 separate requirements; this update changes the current extraction search only.
+
+## 9. Repeated Fields Within a Matched Record
+
+The `extract` command distinguishes scalar `--field` values from repeated
+`--fields` values. Repeated fields are grouped by their repeated DOM region and
+returned as objects in `values.rows` for each matched record. Searching may
+climb a bounded number of ancestors to include sibling DOM branches; the
+default depth is 3 and `--ancestor-depth` accepts 1 through 8. Climbing stops
+before an ancestor containing the selected scalar name more than once, so
+adjacent records are not merged.
+
+When the caller knows stable visible text, `--anchor-text` locates exact text
+matches before semantic record search. Each match maps to its nearest list item
+or article as a record root. Matching `--fields` values and link URL fields use
+the exact anchor node directly; Jev remains available for less explicit field
+descriptions. `--target` is optional when an anchor is supplied and then serves
+as context for semantic field selection.
+
+Named table extraction uses repeatable `--table name` declarations with
+`--table-column name=header` constraints. Each declaration independently finds
+a table inside each matched record that contains every requested header and
+returns all rows and cells, preserving visible text and cell HTML. A record
+may return multiple named tables. A declaration matching multiple tables in
+one record is an ambiguity error; table-only extraction is supported.

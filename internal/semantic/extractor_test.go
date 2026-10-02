@@ -175,6 +175,42 @@ func TestExtractVerifiesNodesInSelectedTagClassGroup(t *testing.T) {
 	}
 }
 
+func TestExtractReturnsMultipleNamedTablesByHeaders(t *testing.T) {
+	page := browser.DOMSnapshot{URL: "https://example.com", Nodes: []browser.DOMNode{
+		{ID: "root", Tag: "li", Text: "Details"},
+		{ID: "link", ParentID: "root", Tag: "a", Text: "Details", DirectText: "Details"},
+		{ID: "t1", ParentID: "root", Tag: "table"}, {ID: "r1h", ParentID: "t1", Tag: "tr"},
+		{ID: "h11", ParentID: "r1h", Tag: "th", Text: "階"}, {ID: "h12", ParentID: "r1h", Tag: "th", Text: "賃料/管理費"},
+		{ID: "r1", ParentID: "t1", Tag: "tr"}, {ID: "c11", ParentID: "r1", Tag: "td", Text: "2階", HTML: "<td>2階</td>"},
+		{ID: "c12", ParentID: "r1", Tag: "td", Text: "9.2万円", HTML: "<td><span>9.2万円</span></td>"},
+		{ID: "t2", ParentID: "root", Tag: "table"}, {ID: "r2h", ParentID: "t2", Tag: "tr"},
+		{ID: "h21", ParentID: "r2h", Tag: "th", Text: "所在地"}, {ID: "r2", ParentID: "t2", Tag: "tr"},
+		{ID: "c21", ParentID: "r2", Tag: "td", Text: "東京都", HTML: "<td>東京都</td>"},
+	}}
+	extractor := NewExtractor(fakeEvaluator(func(context.Context, jev.Request) (*jev.Response, error) {
+		t.Fatal("table extraction must not invoke Jev")
+		return nil, nil
+	}))
+	result, err := extractor.ExtractWithOptions(context.Background(), page, "", nil, 10, ExtractOptions{
+		AnchorText: "Details", Tables: []TableSpec{{Name: "rooms", Columns: []string{"階", "賃料/管理費"}}, {Name: "building", Columns: []string{"所在地"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("got %d items, want 1", len(result.Items))
+	}
+	rooms := result.Items[0].Values["rooms"].(map[string]any)
+	cells := rooms["rows"].([]any)[1].([]any)
+	if cells[1].(map[string]any)["html"] != "<td><span>9.2万円</span></td>" {
+		t.Fatalf("HTML cell not preserved: %#v", cells[1])
+	}
+	building := result.Items[0].Values["building"].(map[string]any)
+	if len(building["rows"].([]any)) != 2 {
+		t.Fatalf("building table = %#v", building)
+	}
+}
+
 func TestFieldValueDistinguishesLinkURLFromLinkLabel(t *testing.T) {
 	anchor := browser.DOMNode{Tag: "a", DirectText: "Learn more", Text: "Learn more", Href: "https://iana.org/help/example-domains"}
 	if got := fieldValue("destination URL of the link", anchor, "https://example.com/"); got != anchor.Href {

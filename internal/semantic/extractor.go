@@ -29,8 +29,10 @@ type Evaluator interface {
 }
 
 type Field struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	Multiple      bool   `json:"multiple,omitempty"`
+	AncestorDepth int    `json:"ancestor_depth,omitempty"`
 }
 
 type Match struct {
@@ -46,6 +48,16 @@ type Result struct {
 	Items  []Match   `json:"items"`
 	Model  string    `json:"model,omitempty"`
 	Usage  jev.Usage `json:"usage"`
+}
+
+type ExtractOptions struct {
+	AnchorText string
+	Tables     []TableSpec
+}
+
+type TableSpec struct {
+	Name    string   `json:"name"`
+	Columns []string `json:"columns"`
 }
 
 type candidate struct {
@@ -84,18 +96,36 @@ func ValidateConcurrency(concurrency int) error {
 // Extract uses Jev to find elements matching target, then selects each
 // requested field from the matching element's descendants.
 func (e *Extractor) Extract(ctx context.Context, page browser.DOMSnapshot, target string, fields []Field, limit int) (*Result, error) {
-	if err := Validate(target, fields, limit); err != nil {
+	return e.ExtractWithOptions(ctx, page, target, fields, limit, ExtractOptions{})
+}
+
+func (e *Extractor) ExtractWithOptions(ctx context.Context, page browser.DOMSnapshot, target string, fields []Field, limit int, options ExtractOptions) (*Result, error) {
+	if strings.TrimSpace(target) == "" && strings.TrimSpace(options.AnchorText) != "" {
+		target = "records containing the exact text " + strings.TrimSpace(options.AnchorText)
+	}
+	if err := Validate(target, fields, limit); err != nil && !(len(fields) == 0 && len(options.Tables) > 0 && limit >= 1 && limit <= 100 && strings.TrimSpace(target) != "") {
+		return nil, err
+	}
+	if err := ValidateTables(options.Tables); err != nil {
 		return nil, err
 	}
 	target = strings.TrimSpace(target)
 
-	candidates := groupedCandidates(page.Nodes)
-	if len(candidates) == 0 {
-		return nil, ErrNoCandidates
-	}
-	matches, usage, model, err := e.findGroupedMatches(ctx, page, target, fields, candidates)
-	if err != nil {
-		return nil, err
+	var matches []candidate
+	var usage jev.Usage
+	model := ""
+	var err error
+	if strings.TrimSpace(options.AnchorText) != "" {
+		matches = anchorRecordCandidates(page.Nodes, options.AnchorText)
+	} else {
+		candidates := groupedCandidates(page.Nodes)
+		if len(candidates) == 0 {
+			return nil, ErrNoCandidates
+		}
+		matches, usage, model, err = e.findGroupedMatches(ctx, page, target, fields, candidates)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if len(matches) > limit {
 		matches = matches[:limit]
@@ -107,16 +137,152 @@ func (e *Extractor) Extract(ctx context.Context, page browser.DOMSnapshot, targe
 	if len(matches) == 0 {
 		return result, nil
 	}
-	fieldUsage, fieldModel, err := e.extractFieldsFromRepresentative(ctx, page, target, fields, matches, result.Items)
-	if err != nil {
-		return nil, err
+	if len(fields) > 0 {
+		fieldUsage, fieldModel, err := e.extractFieldsFromRepresentative(ctx, page, target, fields, matches, result.Items, options.AnchorText)
+		if err != nil {
+			return nil, err
+		}
+		result.Usage.InputTokens += fieldUsage.InputTokens
+		result.Usage.OutputTokens += fieldUsage.OutputTokens
+		if fieldModel != "" {
+			result.Model = fieldModel
+		}
 	}
-	result.Usage.InputTokens += fieldUsage.InputTokens
-	result.Usage.OutputTokens += fieldUsage.OutputTokens
-	if fieldModel != "" {
-		result.Model = fieldModel
+	if len(options.Tables) > 0 {
+		if err := extractTables(page, options.Tables, matches, result.Items); err != nil {
+			return nil, err
+		}
 	}
 	return result, nil
+}
+
+func ValidateTables(tables []TableSpec) error {
+	seen := map[string]bool{}
+	for _, table := range tables {
+		if strings.TrimSpace(table.Name) == "" || seen[table.Name] {
+			return fmt.Errorf("table names must be non-empty and unique: %q", table.Name)
+		}
+		seen[table.Name] = true
+		if len(table.Columns) == 0 {
+			return fmt.Errorf("table %q needs at least one --table-column", table.Name)
+		}
+		for _, column := range table.Columns {
+			if strings.TrimSpace(column) == "" {
+				return fmt.Errorf("table %q has an empty column header", table.Name)
+			}
+		}
+	}
+	return nil
+}
+
+func extractTables(page browser.DOMSnapshot, specs []TableSpec, matches []candidate, output []Match) error {
+	children := childIndex(page.Nodes)
+	byID := nodeIndex(page.Nodes)
+	for itemIndex, match := range matches {
+		nodes := descendants(match.node.ID, children)
+		var tableNodes []browser.DOMNode
+		for _, node := range nodes {
+			if node.Tag == "table" {
+				tableNodes = append(tableNodes, node)
+			}
+		}
+		for _, spec := range specs {
+			var found []browser.DOMNode
+			for _, table := range tableNodes {
+				if tableHasHeaders(table, spec.Columns, children, byID) {
+					found = append(found, table)
+				}
+			}
+			if len(found) > 1 {
+				return fmt.Errorf("item %s has %d tables matching --table %q headers", match.node.ID, len(found), spec.Name)
+			}
+			if len(found) == 0 {
+				output[itemIndex].Values[spec.Name] = nil
+				continue
+			}
+			output[itemIndex].Values[spec.Name] = serializeTable(found[0], children, byID)
+		}
+	}
+	return nil
+}
+
+func tableHasHeaders(table browser.DOMNode, required []string, children map[string][]browser.DOMNode, byID map[string]browser.DOMNode) bool {
+	want := make(map[string]bool, len(required))
+	for _, header := range required {
+		want[normalizeVisibleText(header)] = false
+	}
+	for _, node := range descendants(table.ID, children) {
+		if node.Tag == "th" && nearestTag(node, "table", byID) == table.ID {
+			if _, ok := want[normalizeVisibleText(node.Text)]; ok {
+				want[normalizeVisibleText(node.Text)] = true
+			}
+		}
+	}
+	for _, present := range want {
+		if !present {
+			return false
+		}
+	}
+	return true
+}
+
+func serializeTable(table browser.DOMNode, children map[string][]browser.DOMNode, byID map[string]browser.DOMNode) map[string]any {
+	var rows []browser.DOMNode
+	for _, node := range descendants(table.ID, children) {
+		if node.Tag == "tr" && nearestTag(node, "table", byID) == table.ID {
+			rows = append(rows, node)
+		}
+	}
+	headers := []string{}
+	for _, row := range rows {
+		var cells []browser.DOMNode
+		for _, node := range descendants(row.ID, children) {
+			if (node.Tag == "td" || node.Tag == "th") && nearestTag(node, "tr", byID) == row.ID {
+				cells = append(cells, node)
+			}
+		}
+		if len(headers) == 0 {
+			for _, cell := range cells {
+				if cell.Tag == "th" {
+					headers = append(headers, strings.TrimSpace(cell.Text))
+				}
+			}
+		}
+	}
+	serializedRows := make([]any, 0, len(rows))
+	for _, row := range rows {
+		var cells []browser.DOMNode
+		for _, node := range descendants(row.ID, children) {
+			if (node.Tag == "td" || node.Tag == "th") && nearestTag(node, "tr", byID) == row.ID {
+				cells = append(cells, node)
+			}
+		}
+		serializedCells := make([]any, 0, len(cells))
+		for i, cell := range cells {
+			entry := map[string]any{"tag": cell.Tag, "text": strings.TrimSpace(cell.Text), "html": cell.HTML}
+			if i < len(headers) && headers[i] != "" {
+				entry["header"] = headers[i]
+			}
+			serializedCells = append(serializedCells, entry)
+		}
+		serializedRows = append(serializedRows, serializedCells)
+	}
+	return map[string]any{"headers": headers, "rows": serializedRows}
+}
+
+func nearestTag(node browser.DOMNode, tag string, byID map[string]browser.DOMNode) string {
+	parentID := node.ParentID
+	for parentID != "" {
+		parent, ok := byID[parentID]
+		if !ok {
+			return ""
+		}
+		if parent.Tag == tag {
+			return parent.ID
+		}
+		parentID = parent.ParentID
+	}
+	return ""
 }
 
 func addUsage(total *jev.Usage, usage jev.Usage) {
@@ -143,9 +309,86 @@ func Validate(target string, fields []Field, limit int) error {
 		if seen[name] {
 			return fmt.Errorf("duplicate field name %q", name)
 		}
+		if field.Multiple && (field.AncestorDepth < 1 || field.AncestorDepth > 8) {
+			return errors.New("repeated field ancestor depth must be between 1 and 8")
+		}
 		seen[name] = true
 	}
 	return nil
+}
+
+func anchorRecordCandidates(nodes []browser.DOMNode, rawText string) []candidate {
+	text := normalizeVisibleText(rawText)
+	byID := nodeIndex(nodes)
+	seen := map[string]bool{}
+	var out []candidate
+	for _, node := range nodes {
+		if normalizeVisibleText(node.DirectText) != text && normalizeVisibleText(node.Text) != text {
+			continue
+		}
+		anchor := node
+		for id := node.ID; id != ""; {
+			current, ok := byID[id]
+			if !ok {
+				break
+			}
+			if current.Tag == "a" {
+				anchor = current
+				break
+			}
+			id = current.ParentID
+		}
+		root := anchor
+		for id := anchor.ID; id != ""; {
+			current, ok := byID[id]
+			if !ok {
+				break
+			}
+			if current.Tag == "li" || current.Tag == "article" || current.Role == "listitem" || current.Role == "article" {
+				root = current
+				break
+			}
+			id = current.ParentID
+		}
+		if !seen[root.ID] {
+			seen[root.ID] = true
+			out = append(out, candidate{node: root, repeated: true, score: 1})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].node.Order < out[j].node.Order })
+	return out
+}
+
+func normalizeVisibleText(value string) string {
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func findExactTextNode(rootID, rawText string, nodes []browser.DOMNode, children map[string][]browser.DOMNode) (browser.DOMNode, bool) {
+	wanted := normalizeVisibleText(rawText)
+	descendants := descendantsLimit(rootID, children, 5000)
+	byID := nodeIndex(nodes)
+	for _, node := range descendants {
+		if node.Tag == "a" && (normalizeVisibleText(node.DirectText) == wanted || normalizeVisibleText(node.Text) == wanted) {
+			return node, true
+		}
+	}
+	for _, node := range descendants {
+		if normalizeVisibleText(node.DirectText) != wanted && normalizeVisibleText(node.Text) != wanted {
+			continue
+		}
+		for id := node.ID; id != "" && id != rootID; {
+			parent, ok := byID[id]
+			if !ok {
+				break
+			}
+			if parent.Tag == "a" {
+				return parent, true
+			}
+			id = parent.ParentID
+		}
+		return node, true
+	}
+	return browser.DOMNode{}, false
 }
 
 func (e *Extractor) findMatches(ctx context.Context, page browser.DOMSnapshot, target string, candidates []candidate, prior ...any) ([]candidate, jev.Usage, string, error) {
@@ -301,7 +544,53 @@ type fieldSelector struct {
 	rank  int
 }
 
-func (e *Extractor) extractFieldsFromRepresentative(ctx context.Context, page browser.DOMSnapshot, target string, fields []Field, matches []candidate, output []Match) (jev.Usage, string, error) {
+func (e *Extractor) extractFieldsFromRepresentative(ctx context.Context, page browser.DOMSnapshot, target string, fields []Field, matches []candidate, output []Match, anchorText string) (jev.Usage, string, error) {
+	var scalar, multiple []Field
+	for _, field := range fields {
+		if field.Multiple {
+			multiple = append(multiple, field)
+		} else {
+			scalar = append(scalar, field)
+		}
+	}
+	var total jev.Usage
+	model := ""
+	if len(scalar) > 0 {
+		u, m, err := e.extractScalarFields(ctx, page, target, scalar, matches, output)
+		addUsage(&total, u)
+		if m != "" {
+			model = m
+		}
+		if err != nil {
+			return total, model, err
+		}
+		if anchorText != "" {
+			children := childIndex(page.Nodes)
+			for i, match := range matches {
+				if exact, ok := findExactTextNode(match.node.ID, anchorText, page.Nodes, children); ok {
+					for _, field := range scalar {
+						if fieldUsesAnchorText(field, anchorText) {
+							output[i].Values[field.Name] = fieldValue(field.Description, exact, page.URL)
+						}
+					}
+				}
+			}
+		}
+	}
+	if len(multiple) > 0 {
+		u, m, err := e.extractMultipleFields(ctx, page, target, multiple, fields, matches, output, anchorText)
+		addUsage(&total, u)
+		if m != "" {
+			model = m
+		}
+		if err != nil {
+			return total, model, err
+		}
+	}
+	return total, model, nil
+}
+
+func (e *Extractor) extractScalarFields(ctx context.Context, page browser.DOMSnapshot, target string, fields []Field, matches []candidate, output []Match) (jev.Usage, string, error) {
 	selectors, usage, model, err := e.selectRepresentativeFields(ctx, page, target, fields, matches[0].node, output[0])
 	if err != nil {
 		return usage, model, err
@@ -321,14 +610,172 @@ func (e *Extractor) extractFieldsFromRepresentative(ctx context.Context, page br
 	return usage, model, nil
 }
 
+func (e *Extractor) extractMultipleFields(ctx context.Context, page browser.DOMSnapshot, target string, multiple, all []Field, matches []candidate, output []Match, anchorText string) (jev.Usage, string, error) {
+	children, byID := childIndex(page.Nodes), nodeIndex(page.Nodes)
+	depth := 3
+	for _, field := range multiple {
+		if field.AncestorDepth > 0 && field.AncestorDepth > depth {
+			depth = field.AncestorDepth
+		}
+	}
+	root := matches[0].node
+	if anchorText == "" {
+		root = expandMultiRoot(root, depth, byID, children, all, output[0].Values)
+	}
+	temp := Match{Values: map[string]any{}}
+	var selectors []fieldSelector
+	var usage jev.Usage
+	model := ""
+	var semanticFields []Field
+	for _, field := range multiple {
+		if anchorText != "" && fieldUsesAnchorText(field, anchorText) {
+			if exact, ok := findExactTextNode(root.ID, anchorText, page.Nodes, children); ok {
+				selectors = append(selectors, fieldSelector{field: field, node: exact})
+				continue
+			}
+		}
+		semanticFields = append(semanticFields, field)
+	}
+	if len(semanticFields) > 0 {
+		selected, selectedUsage, selectedModel, err := e.selectRepresentativeFields(ctx, page, target, semanticFields, root, temp)
+		if err != nil {
+			return selectedUsage, selectedModel, err
+		}
+		selectors = append(selectors, selected...)
+		usage, model = selectedUsage, selectedModel
+	}
+	selected := make([]browser.DOMNode, 0, len(selectors))
+	for _, selector := range selectors {
+		selected = append(selected, selector.node)
+	}
+	row := commonAncestor(selected, byID)
+	rows := []browser.DOMNode{row}
+	if row.ID != "" {
+		rows = rows[:0]
+		for _, node := range descendantsLimit(root.ID, children, 5000) {
+			if node.Tag == row.Tag && normalizedClass(node.Class) == normalizedClass(row.Class) {
+				rows = append(rows, node)
+			}
+		}
+		if len(rows) == 0 {
+			rows = []browser.DOMNode{row}
+		}
+	}
+	for itemIndex, match := range matches {
+		itemRoot := match.node
+		if anchorText == "" {
+			itemRoot = expandMultiRoot(itemRoot, depth, byID, children, all, output[itemIndex].Values)
+		}
+		itemRows := rows
+		if itemIndex > 0 && row.ID != "" {
+			itemRows = itemRows[:0]
+			for _, node := range descendantsLimit(itemRoot.ID, children, 5000) {
+				if node.Tag == row.Tag && normalizedClass(node.Class) == normalizedClass(row.Class) {
+					itemRows = append(itemRows, node)
+				}
+			}
+		}
+		values := make([]any, 0, len(itemRows))
+		for _, rowNode := range itemRows {
+			entry := map[string]any{}
+			for _, selector := range selectors {
+				local := selector
+				local.rank = rankInRoot(row, selector.node, children)
+				node, ok := browser.DOMNode{}, false
+				if rowNode.Tag == selector.node.Tag && normalizedClass(rowNode.Class) == normalizedClass(selector.node.Class) {
+					node, ok = rowNode, true
+				} else {
+					node, ok = findFieldNode(rowNode.ID, local, children)
+				}
+				if !ok {
+					entry[selector.field.Name] = nil
+					continue
+				}
+				entry[selector.field.Name] = fieldValue(selector.field.Description, node, page.URL)
+			}
+			values = append(values, entry)
+		}
+		output[itemIndex].Values["rows"] = values
+	}
+	return usage, model, nil
+}
+
+func fieldUsesAnchorText(field Field, anchorText string) bool {
+	return normalizeVisibleText(field.Description) == normalizeVisibleText(anchorText) || wantsLinkURL(strings.ToLower(field.Name+" "+field.Description))
+}
+
+func expandMultiRoot(node browser.DOMNode, maxDepth int, byID map[string]browser.DOMNode, children map[string][]browser.DOMNode, fields []Field, values map[string]any) browser.DOMNode {
+	name := ""
+	for _, field := range fields {
+		if !field.Multiple && containsAny(strings.ToLower(field.Name+" "+field.Description), "name", "title", "名前", "名称", "物件名", "商品名", "タイトル") {
+			if v, ok := values[field.Name].(string); ok {
+				name = v
+				break
+			}
+		}
+	}
+	root := node
+	for i := 0; i < maxDepth && root.ParentID != ""; i++ {
+		parent, ok := byID[root.ParentID]
+		if !ok {
+			break
+		}
+		if name != "" && strings.Count(parent.Text, name) > 1 {
+			break
+		}
+		root = parent
+	}
+	return root
+}
+
+func commonAncestor(nodes []browser.DOMNode, byID map[string]browser.DOMNode) browser.DOMNode {
+	if len(nodes) == 0 {
+		return browser.DOMNode{}
+	}
+	if len(nodes) == 1 {
+		return nodes[0]
+	}
+	ancestors := map[string]bool{}
+	for n := nodes[0]; n.ID != ""; n = byID[n.ParentID] {
+		ancestors[n.ID] = true
+	}
+	for n := nodes[1]; n.ID != ""; n = byID[n.ParentID] {
+		if ancestors[n.ID] {
+			return n
+		}
+	}
+	return browser.DOMNode{}
+}
+
+func rankInRoot(root, selected browser.DOMNode, children map[string][]browser.DOMNode) int {
+	rank := 0
+	for _, node := range descendants(root.ID, children) {
+		if node.Tag == selected.Tag && normalizedClass(node.Class) == normalizedClass(selected.Class) {
+			if node.ID == selected.ID {
+				return rank
+			}
+			rank++
+		}
+	}
+	return 0
+}
+
 func (e *Extractor) selectRepresentativeFields(ctx context.Context, page browser.DOMSnapshot, target string, fields []Field, representative browser.DOMNode, output Match) ([]fieldSelector, jev.Usage, string, error) {
 	children := childIndex(page.Nodes)
 	byID := nodeIndex(page.Nodes)
 	descendants := descendants(representative.ID, children)
+	candidateLimit := maxChildren
+	for _, field := range fields {
+		if field.Multiple {
+			descendants = descendantsLimit(representative.ID, children, 5000)
+			candidateLimit = 120
+			break
+		}
+	}
 	if representative.DirectText != "" || representative.Href != "" || representative.Src != "" || representative.Alt != "" || representative.AriaLabel != "" || representative.Title != "" || len(representative.Attributes) > 0 {
 		descendants = append([]browser.DOMNode{representative}, descendants...)
 	}
-	fieldCandidates := selectFieldCandidates(descendants)
+	fieldCandidates := selectFieldCandidatesLimit(descendants, candidateLimit)
 	choiceNodes := make([]map[string]any, 0, len(fieldCandidates))
 	options := make(map[string]any, len(fieldCandidates)+1)
 	for _, node := range fieldCandidates {
@@ -338,9 +785,13 @@ func (e *Extractor) selectRepresentativeFields(ctx context.Context, page browser
 	options["none"] = "No element in this item contains the requested field."
 	questions := make(map[string]jev.Question, len(fields))
 	for index, field := range fields {
+		instructions := fmt.Sprintf("For the representative record found as %q, select the descendant DOM element that contains the requested field %q. Choose none if unavailable.", target, field.Description)
+		if field.Multiple {
+			instructions = fmt.Sprintf("For the first repeated row within the record found as %q, select the element containing repeated field %q. Prefer the first matching row and do not select a value from another record.", target, field.Description)
+		}
 		questions[fmt.Sprintf("field_%s_%d", representative.ID, index)] = jev.Question{
 			Type:         jev.QuestionChoice,
-			Instructions: fmt.Sprintf("For the representative record found as %q, select the descendant DOM element that contains the requested field %q. Choose none if unavailable.", target, field.Description),
+			Instructions: instructions,
 			Criteria:     options,
 		}
 	}
@@ -387,6 +838,11 @@ func (e *Extractor) selectRepresentativeFields(ctx context.Context, page browser
 
 func findFieldNode(itemID string, selector fieldSelector, children map[string][]browser.DOMNode) (browser.DOMNode, bool) {
 	descendants := descendants(itemID, children)
+	for _, node := range descendants {
+		if node.ID == itemID && node.Tag == selector.node.Tag && normalizedClass(node.Class) == normalizedClass(selector.node.Class) {
+			return node, true
+		}
+	}
 	var samePattern []browser.DOMNode
 	for _, node := range descendants {
 		if node.Tag == selector.node.Tag && normalizedClass(node.Class) == normalizedClass(selector.node.Class) {
@@ -624,11 +1080,15 @@ func linkTextMatches(fieldText, linkText string) bool {
 }
 
 func descendants(id string, children map[string][]browser.DOMNode) []browser.DOMNode {
+	return descendantsLimit(id, children, maxChildren)
+}
+
+func descendantsLimit(id string, children map[string][]browser.DOMNode, limit int) []browser.DOMNode {
 	out := make([]browser.DOMNode, 0, maxChildren)
 	var walk func(string)
 	walk = func(parent string) {
 		for _, child := range children[parent] {
-			if len(out) >= maxChildren {
+			if len(out) >= limit {
 				return
 			}
 			out = append(out, child)
@@ -640,7 +1100,11 @@ func descendants(id string, children map[string][]browser.DOMNode) []browser.DOM
 }
 
 func selectFieldCandidates(nodes []browser.DOMNode) []browser.DOMNode {
-	out := make([]browser.DOMNode, 0, maxChildren)
+	return selectFieldCandidatesLimit(nodes, maxChildren)
+}
+
+func selectFieldCandidatesLimit(nodes []browser.DOMNode, limit int) []browser.DOMNode {
+	out := make([]browser.DOMNode, 0, min(limit, len(nodes)))
 	for _, node := range nodes {
 		if !eligibleSemanticNode(node) {
 			continue
@@ -649,7 +1113,7 @@ func selectFieldCandidates(nodes []browser.DOMNode) []browser.DOMNode {
 			continue
 		}
 		out = append(out, node)
-		if len(out) == maxChildren {
+		if len(out) == limit {
 			break
 		}
 	}

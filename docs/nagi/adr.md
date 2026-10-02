@@ -182,3 +182,85 @@ by a reusable class could also include unrelated elements without verification.
 - Mocked tests compare request counts and serialized payload sizes, verify
   unrelated nodes are rejected, and cover shared ancestors at differing depths.
   Real API latency and classification accuracy require live-page measurement.
+
+## ADR-006: Repeated Fields Within a Matched Record
+
+### Status
+Accepted
+
+### Context
+Some result records contain a scalar parent section and a repeated sibling
+region, such as one building with multiple room rows. Representative field
+selection from only the matched node can omit those sibling rows or collapse
+them into one value.
+
+### Decision
+1. Keep `--field name=description` for one value per matched record and add
+   repeatable `--fields name=description` for values that belong to repeated
+   sibling regions.
+2. Return repeated fields together as `values.rows`, an ordered array of
+   objects, while preserving the outer matched record and its scalar values.
+3. Permit a bounded ancestor search to include sibling branches. The default
+   depth is 3 and `--ancestor-depth` accepts values from 1 to 8. Stop before an
+   ancestor whose text contains the selected scalar name more than once.
+
+### Consequences
+- Building fields remain scalar while room-row fields stay grouped together.
+- The repeated region is inferred from the selected fields' common DOM
+  ancestor and repeated tag/class signature; unusual markup may need a depth
+  adjustment or more descriptive fields.
+- A repeated item without a selected scalar name uses the configured depth
+  limit as its boundary.
+
+## ADR-007: Exact Text Anchors for Record Discovery
+
+### Status
+Accepted
+
+### Context
+Broad semantic targets can match both complete records and their nested
+children. Pages often expose a stable, explicit text such as a detail-link
+label that identifies the relevant record region more reliably than a
+semantic guess.
+
+### Decision
+1. Add optional `--anchor-text` for exact visible-text matching. When supplied,
+   use each match's nearest list-item or article ancestor as the record root
+   and deduplicate roots before field extraction.
+2. Use fields whose descriptions match the anchor text, and requested link URL
+   fields, directly from the matched anchor node. Use Jev for less explicit
+   fields within the chosen record root.
+3. Keep `--target` as optional semantic context when `--anchor-text` is present;
+   without an anchor, retain the existing semantic record search.
+
+### Consequences
+- Exact text anchors bypass broad semantic candidate matching and reduce
+  accidental child-node records.
+- Pages without list-item or article wrappers fall back to the exact matching
+  node as the record root; callers may need semantic search for other layouts.
+
+## ADR-008: Named Table Extraction by Header Constraints
+
+### Status
+Accepted
+
+### Context
+Some matched records contain multiple tables with different kinds of values.
+Selecting isolated columns cannot identify which table's rows belong together,
+and callers may need the original markup for cells containing links or nested
+content.
+
+### Decision
+1. Declare each output table with repeatable `--table name` and associate
+   required header text using repeatable `--table-column name=header`.
+2. Match each declaration independently inside each record by requiring all
+   specified header texts in the same table.
+3. Return every row and cell for the matching table, including visible text and
+   the cell's outer HTML. Report an error if more than one table matches one
+   declaration inside a record.
+
+### Consequences
+- One record can return multiple separately named tables without selecting
+  individual columns.
+- Header text is the table identity; layouts with duplicate header sets are
+  reported as ambiguous and need a more distinctive set of headers.
