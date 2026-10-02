@@ -204,7 +204,7 @@ func patternGroup(nodes []browser.DOMNode, representative browser.DOMNode, class
 	}
 	var out []candidate
 	for _, node := range nodes {
-		if node.Tag != representative.Tag || !hasAnyClass(node.Class, classes) || !usefulNodeText(node) {
+		if node.Tag != representative.Tag || !hasAnyClass(node.Class, classes) || !eligibleSemanticNode(node) || !usefulNodeText(node) {
 			continue
 		}
 		out = append(out, candidate{node: node, repeated: true})
@@ -520,7 +520,7 @@ func makeCandidates(nodes []browser.DOMNode, limit int) []candidate {
 	type groupKey struct{ parent, signature string }
 	groups := make(map[groupKey][]browser.DOMNode)
 	for _, node := range nodes {
-		if !usefulNodeText(node) {
+		if !eligibleSemanticNode(node) || !usefulNodeText(node) {
 			continue
 		}
 		key := groupKey{node.ParentID, node.Tag + "|" + node.Role + "|" + normalizedClass(node.Class)}
@@ -537,7 +537,7 @@ func makeCandidates(nodes []browser.DOMNode, limit int) []candidate {
 	out := make([]candidate, 0, limit)
 	added := make(map[string]bool)
 	add := func(node browser.DOMNode, repeated bool) {
-		if len(out) >= limit || added[node.ID] || !usefulNodeText(node) {
+		if len(out) >= limit || added[node.ID] || !eligibleSemanticNode(node) || !usefulNodeText(node) {
 			return
 		}
 		added[node.ID] = true
@@ -578,6 +578,9 @@ func normalizedClass(class string) string {
 }
 
 func isLandmark(node browser.DOMNode) bool {
+	if !eligibleSemanticNode(node) {
+		return false
+	}
 	switch node.Tag {
 	case "main", "article", "section", "li", "tr", "h1", "h2", "h3", "blockquote", "a", "button":
 		return true
@@ -598,10 +601,24 @@ func isTextLeaf(node browser.DOMNode, children map[string][]browser.DOMNode) boo
 			return false
 		}
 	}
-	return node.Tag != "script" && node.Tag != "style" && node.Tag != "noscript"
+	return eligibleSemanticNode(node)
+}
+
+// eligibleSemanticNode excludes elements that rarely carry useful scraping
+// records or fields. The page snapshot itself remains intact for `content`.
+func eligibleSemanticNode(node browser.DOMNode) bool {
+	switch strings.ToLower(node.Tag) {
+	case "script", "style", "noscript", "template", "font", "center", "br", "hr", "wbr":
+		return false
+	default:
+		return true
+	}
 }
 
 func usefulNodeText(node browser.DOMNode) bool {
+	if !eligibleSemanticNode(node) {
+		return false
+	}
 	text := strings.TrimSpace(node.Text)
 	if len(text) >= 12 {
 		return true
@@ -646,6 +663,9 @@ func descendants(id string, children map[string][]browser.DOMNode) []browser.DOM
 func selectFieldCandidates(nodes []browser.DOMNode) []browser.DOMNode {
 	out := make([]browser.DOMNode, 0, maxChildren)
 	for _, node := range nodes {
+		if !eligibleSemanticNode(node) {
+			continue
+		}
 		if node.DirectText == "" && node.Href == "" && node.Src == "" && node.Alt == "" && node.Title == "" && node.AriaLabel == "" && len(node.Attributes) == 0 {
 			continue
 		}
