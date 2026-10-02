@@ -102,6 +102,7 @@ Semcrawl operates with a **Daemon + CLI** architecture with on-demand daemon lif
 - **Sub-Element Attribute & Text Extraction:**
   - Extract specific fields from resolved nodes (e.g., query `"Product Name, Price"` against a `Product` node).
   - Returns extracted structured data per field (text content, attributes like `href`, `src`).
+  - For name or title fields, also return an associated link URL as `<field_name>_url` when the selected field node has an `href`, contains a link, or is contained by a link. Resolve relative URLs against the page URL without navigating to the link.
 
 ### 4.4 Multi-Language Friendly Output
 - All CLI commands support JSON output formatting with clear status codes and error messages.

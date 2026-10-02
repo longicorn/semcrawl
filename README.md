@@ -80,7 +80,11 @@ Jev what value to select. The response includes an `items` array; each item has
 a `node_id`, a match `score`, and a `values` object. The response also reports
 the Jev model and token usage. `--limit` sets the maximum number of matching
 items returned (up to 100), after candidate search and verification. One to twelve
-fields can be requested.
+fields can be requested. For name or title fields such as
+`--field name="property name"`, `values` also includes `name_url` when the
+selected name element has a link, contains a link, or is inside a link. Relative
+links are resolved against the current page URL; Semcrawl does not open the
+destination.
 
 Extraction first groups usable DOM nodes by tag and the complete, sorted class
 set. Jev evaluates group summaries with up to three samples, then verifies the

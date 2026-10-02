@@ -34,6 +34,9 @@ When no records match, requested field elements seed a bottom-up ancestor
 search. The return limit is applied after matching, before field extraction.
 The response contains an `items` array with one `values` object and a Jev match
 score per item, along with the model and reported token usage.
+For name or title fields, the values object also includes `<field>_url` when a
+link is attached to the selected element, nested inside it, or wraps it. Relative
+URLs are resolved against the page URL, and the destination is not opened.
 
 The daemon uses a Unix domain socket at `$XDG_RUNTIME_DIR/semcrawl.sock`, or
 `<user config directory>/semcrawl/semcrawl.sock` when that environment variable
