@@ -70,7 +70,7 @@ func (e *Extractor) findGroupedMatches(ctx context.Context, page browser.DOMSnap
 		requests = append(requests, jev.Request{State: map[string]any{"page": map[string]string{"title": page.Title}, "user_request": target, "groups": summaries}, Questions: questions})
 		batches = append(batches, batch)
 	}
-	for index, result := range evaluateParallel(ctx, e.evaluator, requests) {
+	for index, result := range evaluateParallel(ctx, e.evaluator, e.concurrency, requests) {
 		if result.err != nil {
 			return nil, total, model, fmt.Errorf("Jev group selection: %w", result.err)
 		}
@@ -136,7 +136,7 @@ func (e *Extractor) findFromFields(ctx context.Context, page browser.DOMSnapshot
 		requests = append(requests, jev.Request{State: map[string]any{"page": map[string]string{"title": page.Title}, "user_request": target, "fields": fields, "field_candidates": summaries}, Questions: questions})
 		batches = append(batches, batch)
 	}
-	for index, result := range evaluateParallel(ctx, e.evaluator, requests) {
+	for index, result := range evaluateParallel(ctx, e.evaluator, e.concurrency, requests) {
 		if result.err != nil {
 			return nil, total, model, fmt.Errorf("Jev field anchor selection: %w", result.err)
 		}

@@ -14,10 +14,10 @@ type evaluationResult struct {
 
 // evaluateParallel runs independent Jev requests with a small fixed worker
 // pool. Results retain input order so callers can aggregate deterministically.
-func evaluateParallel(ctx context.Context, evaluator Evaluator, requests []jev.Request) []evaluationResult {
+func evaluateParallel(ctx context.Context, evaluator Evaluator, concurrency int, requests []jev.Request) []evaluationResult {
 	results := make([]evaluationResult, len(requests))
 	jobs := make(chan int)
-	workers := min(matchParallelism, len(requests))
+	workers := min(concurrency, len(requests))
 	var wg sync.WaitGroup
 	for range workers {
 		wg.Add(1)

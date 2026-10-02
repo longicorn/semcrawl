@@ -49,9 +49,14 @@ first `open` if you plan to use `extract`:
 
 ```sh
 export TYPESAFE_API_KEY="your-api-key"
+export SEMCRAWL_JEV_CONCURRENCY=2
 
 go run ./cmd/semcrawl open
 ```
+
+`SEMCRAWL_JEV_CONCURRENCY` sets concurrent Jev evaluations per daemon. It
+defaults to `2` and accepts values from `1` to `8`. Restart the daemon after
+changing it.
 
 `open` prints JSON containing a `session_id`. Use that ID in subsequent
 commands:

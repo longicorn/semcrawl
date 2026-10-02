@@ -13,12 +13,13 @@ import (
 )
 
 const (
-	matchBatchSize   = 20
-	matchParallelism = 2
-	fieldBatchSize   = 5
-	matchThreshold   = 0.65
-	maxFields        = 12
-	maxChildren      = 30
+	matchBatchSize     = 20
+	fieldBatchSize     = 5
+	matchThreshold     = 0.65
+	maxFields          = 12
+	maxChildren        = 30
+	DefaultConcurrency = 2
+	MaxConcurrency     = 8
 )
 
 var ErrNoCandidates = errors.New("no usable DOM elements found on this page")
@@ -58,11 +59,26 @@ type fieldWork struct {
 }
 
 type Extractor struct {
-	evaluator Evaluator
+	evaluator   Evaluator
+	concurrency int
 }
 
 func NewExtractor(evaluator Evaluator) *Extractor {
-	return &Extractor{evaluator: evaluator}
+	return NewExtractorWithConcurrency(evaluator, DefaultConcurrency)
+}
+
+func NewExtractorWithConcurrency(evaluator Evaluator, concurrency int) *Extractor {
+	if concurrency < 1 || concurrency > MaxConcurrency {
+		concurrency = DefaultConcurrency
+	}
+	return &Extractor{evaluator: evaluator, concurrency: concurrency}
+}
+
+func ValidateConcurrency(concurrency int) error {
+	if concurrency < 1 || concurrency > MaxConcurrency {
+		return fmt.Errorf("Jev concurrency must be between 1 and %d", MaxConcurrency)
+	}
+	return nil
 }
 
 // Extract uses Jev to find elements matching target, then selects each
@@ -166,7 +182,7 @@ func (e *Extractor) findMatches(ctx context.Context, page browser.DOMSnapshot, t
 		})
 		batches = append(batches, batch)
 	}
-	for index, result := range evaluateParallel(ctx, e.evaluator, requests) {
+	for index, result := range evaluateParallel(ctx, e.evaluator, e.concurrency, requests) {
 		if result.err != nil {
 			return nil, usage, model, fmt.Errorf("Jev target matching: %w", result.err)
 		}

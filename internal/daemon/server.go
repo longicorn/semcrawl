@@ -33,11 +33,15 @@ type Server struct {
 	stopOnce    sync.Once
 }
 
-func NewServer(ctx context.Context) *Server {
+func NewServer(ctx context.Context, concurrency ...int) *Server {
+	maxConcurrency := semantic.DefaultConcurrency
+	if len(concurrency) > 0 {
+		maxConcurrency = concurrency[0]
+	}
 	factory := browser.NewChromeFactory(ctx)
 	return &Server{
 		manager:     session.NewManager(factory),
-		extractor:   semantic.NewExtractor(jev.NewClient("")),
+		extractor:   semantic.NewExtractorWithConcurrency(jev.NewClient("", jev.WithMaxConcurrency(maxConcurrency)), maxConcurrency),
 		factory:     factory,
 		lastRequest: time.Now(),
 		stopping:    make(chan struct{}),

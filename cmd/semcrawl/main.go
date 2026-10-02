@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 
@@ -215,6 +216,17 @@ func runDaemonCommand(args []string, stdout io.Writer) error {
 }
 
 func runDaemon() error {
+	concurrency := semantic.DefaultConcurrency
+	if raw := strings.TrimSpace(os.Getenv("SEMCRAWL_JEV_CONCURRENCY")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			return fmt.Errorf("SEMCRAWL_JEV_CONCURRENCY must be an integer between 1 and %d", semantic.MaxConcurrency)
+		}
+		concurrency = parsed
+	}
+	if err := semantic.ValidateConcurrency(concurrency); err != nil {
+		return fmt.Errorf("SEMCRAWL_JEV_CONCURRENCY: %w", err)
+	}
 	socketPath, err := daemon.DefaultSocketPath()
 	if err != nil {
 		return err
@@ -225,7 +237,7 @@ func runDaemon() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	server := daemon.NewServer(ctx)
+	server := daemon.NewServer(ctx, concurrency)
 	return server.Serve(ctx, listener, socketPath)
 }
 

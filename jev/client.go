@@ -15,9 +15,11 @@ import (
 )
 
 const (
-	DefaultBaseURL = "https://api.typesafe.ai"
-	DefaultModel   = "jev-latest"
-	maxBodyBytes   = 8 << 20
+	DefaultBaseURL     = "https://api.typesafe.ai"
+	DefaultModel       = "jev-latest"
+	maxBodyBytes       = 8 << 20
+	defaultConcurrency = 2
+	maxConcurrency     = 8
 )
 
 // QuestionType identifies one of Jev's supported question types.
@@ -98,10 +100,11 @@ func (e *APIError) Error() string {
 
 // Client calls the TypeSafe Jev API.
 type Client struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client
-	requests   chan struct{}
+	baseURL     string
+	apiKey      string
+	httpClient  *http.Client
+	requests    chan struct{}
+	concurrency int
 }
 
 // Option configures a Client.
@@ -123,6 +126,20 @@ func WithHTTPClient(httpClient *http.Client) Option {
 	}
 }
 
+// WithMaxConcurrency sets the maximum number of concurrent evaluation calls.
+// Values below one use the default of two; values above eight are capped.
+func WithMaxConcurrency(concurrency int) Option {
+	return func(c *Client) {
+		if concurrency < 1 {
+			c.concurrency = defaultConcurrency
+		} else if concurrency > maxConcurrency {
+			c.concurrency = maxConcurrency
+		} else {
+			c.concurrency = concurrency
+		}
+	}
+}
+
 // NewClient creates a client. An empty apiKey reads TYPESAFE_API_KEY from the
 // environment. The default HTTP timeout is 30 seconds.
 func NewClient(apiKey string, options ...Option) *Client {
@@ -130,14 +147,15 @@ func NewClient(apiKey string, options ...Option) *Client {
 		apiKey = os.Getenv("TYPESAFE_API_KEY")
 	}
 	c := &Client{
-		baseURL:    DefaultBaseURL,
-		apiKey:     apiKey,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		requests:   make(chan struct{}, 2),
+		baseURL:     DefaultBaseURL,
+		apiKey:      apiKey,
+		httpClient:  &http.Client{Timeout: 30 * time.Second},
+		concurrency: defaultConcurrency,
 	}
 	for _, option := range options {
 		option(c)
 	}
+	c.requests = make(chan struct{}, c.concurrency)
 	return c
 }
 
