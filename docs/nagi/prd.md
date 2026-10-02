@@ -212,3 +212,10 @@ or article as a record root. Matching `--fields` values and link URL fields use
 the exact anchor node directly; Jev remains available for less explicit field
 descriptions. `--target` is optional when an anchor is supplied and then serves
 as context for semantic field selection.
+
+Named table extraction uses repeatable `--table name` declarations with
+`--table-column name=header` constraints. Each declaration independently finds
+a table inside each matched record that contains every requested header and
+returns all rows and cells, preserving visible text and cell HTML. A record
+may return multiple named tables. A declaration matching multiple tables in
+one record is an ambiguity error; table-only extraction is supported.

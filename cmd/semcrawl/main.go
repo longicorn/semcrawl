@@ -126,7 +126,7 @@ func (f *repeatedFlag) Set(value string) error {
 
 func runExtract(args []string, stdout, stderr io.Writer) error {
 	if len(args) < 1 {
-		return errors.New("usage: semcrawl extract <session_id> (--target <description> | --anchor-text <exact text>) [--field name=description ...] [--fields name=description ...] [--ancestor-depth n] [--limit n]")
+		return errors.New("usage: semcrawl extract <session_id> (--target <description> | --anchor-text <exact text>) [--field name=description ...] [--fields name=description ...] [--table name --table-column name=header ...] [--limit n]")
 	}
 	sessionID := args[0]
 	flags := flag.NewFlagSet("extract", flag.ContinueOnError)
@@ -138,6 +138,9 @@ func runExtract(args []string, stdout, stderr io.Writer) error {
 	var fields, multiFields repeatedFlag
 	flags.Var(&fields, "field", "single output field as name=description; repeat as needed")
 	flags.Var(&multiFields, "fields", "repeated row fields as name=description; repeat as needed")
+	var tableNames, tableColumns repeatedFlag
+	flags.Var(&tableNames, "table", "table output name; repeat for each table")
+	flags.Var(&tableColumns, "table-column", "table header as table_name=header; repeat for each table column")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -162,8 +165,37 @@ func runExtract(args []string, stdout, stderr io.Writer) error {
 		}
 		parsedFields = append(parsedFields, semantic.Field{Name: strings.TrimSpace(name), Description: strings.TrimSpace(description), Multiple: true, AncestorDepth: *depth})
 	}
-	if len(parsedFields) == 0 {
-		return errors.New("provide at least one --field or --fields")
+	tablesByName := map[string]*semantic.TableSpec{}
+	orderedTables := make([]semantic.TableSpec, 0, len(tableNames))
+	for _, name := range tableNames {
+		name = strings.TrimSpace(name)
+		if name == "" || tablesByName[name] != nil {
+			return fmt.Errorf("invalid or duplicate --table name %q", name)
+		}
+		table := &semantic.TableSpec{Name: name}
+		tablesByName[name] = table
+		orderedTables = append(orderedTables, *table)
+	}
+	for _, raw := range tableColumns {
+		name, header, ok := strings.Cut(raw, "=")
+		name, header = strings.TrimSpace(name), strings.TrimSpace(header)
+		if !ok || name == "" || header == "" {
+			return fmt.Errorf("invalid --table-column %q: expected table_name=header", raw)
+		}
+		table := tablesByName[name]
+		if table == nil {
+			return fmt.Errorf("--table-column refers to undeclared table %q", name)
+		}
+		table.Columns = append(table.Columns, header)
+	}
+	for i := range orderedTables {
+		orderedTables[i] = *tablesByName[orderedTables[i].Name]
+	}
+	if len(parsedFields) == 0 && len(orderedTables) == 0 {
+		return errors.New("provide at least one --field, --fields, or --table")
+	}
+	if err := semantic.ValidateTables(orderedTables); err != nil {
+		return err
 	}
 	if strings.TrimSpace(*target) == "" && strings.TrimSpace(*anchorText) == "" {
 		return errors.New("provide --target or --anchor-text")
@@ -173,7 +205,7 @@ func runExtract(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	var result map[string]any
-	request := map[string]any{"target": *target, "anchor_text": *anchorText, "fields": parsedFields, "limit": *limit}
+	request := map[string]any{"target": *target, "anchor_text": *anchorText, "fields": parsedFields, "tables": orderedTables, "limit": *limit}
 	if err := client.Call(context.Background(), http.MethodPost, "/sessions/"+sessionID+"/extract", request, &result); err != nil {
 		return err
 	}

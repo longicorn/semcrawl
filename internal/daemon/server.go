@@ -208,10 +208,11 @@ func (s *Server) content(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) extract(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Target     string           `json:"target"`
-		AnchorText string           `json:"anchor_text"`
-		Fields     []semantic.Field `json:"fields"`
-		Limit      int              `json:"limit"`
+		Target     string               `json:"target"`
+		AnchorText string               `json:"anchor_text"`
+		Fields     []semantic.Field     `json:"fields"`
+		Tables     []semantic.TableSpec `json:"tables"`
+		Limit      int                  `json:"limit"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeError(w, http.StatusBadRequest, errors.New("invalid JSON request"))
@@ -224,8 +225,15 @@ func (s *Server) extract(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(targetForValidation) == "" && strings.TrimSpace(request.AnchorText) != "" {
 		targetForValidation = "records containing the exact text " + strings.TrimSpace(request.AnchorText)
 	}
-	if err := semantic.Validate(targetForValidation, request.Fields, request.Limit); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	validationErr := semantic.Validate(targetForValidation, request.Fields, request.Limit)
+	if len(request.Fields) == 0 && len(request.Tables) > 0 && request.Limit >= 1 && request.Limit <= 100 && strings.TrimSpace(targetForValidation) != "" {
+		validationErr = nil
+	}
+	if validationErr == nil {
+		validationErr = semantic.ValidateTables(request.Tables)
+	}
+	if validationErr != nil {
+		writeError(w, http.StatusBadRequest, validationErr)
 		return
 	}
 	page, err := s.manager.DOM(r.Context(), r.PathValue("id"))
@@ -239,7 +247,7 @@ func (s *Server) extract(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err)
 		return
 	}
-	result, err := s.extractor.ExtractWithOptions(r.Context(), page, request.Target, request.Fields, request.Limit, semantic.ExtractOptions{AnchorText: request.AnchorText})
+	result, err := s.extractor.ExtractWithOptions(r.Context(), page, request.Target, request.Fields, request.Limit, semantic.ExtractOptions{AnchorText: request.AnchorText, Tables: request.Tables})
 	if err != nil {
 		status := http.StatusBadGateway
 		if errors.Is(err, semantic.ErrNoCandidates) {

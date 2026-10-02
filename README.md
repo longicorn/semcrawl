@@ -73,6 +73,9 @@ go run ./cmd/semcrawl extract "$SESSION_ID" \
   --field url="the destination URL" \
   --fields detail="Learn more" \
   --fields detail_url="the destination URL" \
+  --table rooms \
+  --table-column rooms="Floor" \
+  --table-column rooms="Rent/Management fee" \
   --limit 20
 go run ./cmd/semcrawl close "$SESSION_ID"
 ```
@@ -100,6 +103,15 @@ than asking Jev to choose it. Without `--anchor-text`, repeated fields may
 search up to three ancestor levels by default; `--ancestor-depth` changes that
 limit from 1 to 8 and stops before an ancestor whose text repeats the selected
 single `--field` name more than once.
+
+Use `--table name` with repeatable `--table-column name=header` to return a
+whole table selected by its headers. Each named table is located separately
+within every matched record, so one record can return multiple tables. A table
+must contain all specified header texts; if multiple tables match the same
+name within one record, extraction reports an ambiguity error. Each
+`values.<name>` contains `headers` and ordered `rows`; every cell includes its
+visible `text`, original cell `html`, and matching `header` where available.
+Table extraction can be used without `--field` or `--fields`.
 
 Extraction first groups usable DOM nodes by tag and the complete, sorted class
 set. Jev evaluates group summaries with up to three samples, then verifies the

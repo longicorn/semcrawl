@@ -16,6 +16,9 @@ go run ./cmd/semcrawl extract <session_id> \
   --field price="price" \
   --fields label="View details" \
   --fields detail_url="destination URL" \
+  --table rooms \
+  --table-column rooms="Floor" \
+  --table-column rooms="Rent/Management fee" \
   --ancestor-depth 3
 go run ./cmd/semcrawl close <session_id>
 ```
@@ -50,6 +53,14 @@ as `values.rows`, an array of objects. Without `--anchor-text`, the default
 ancestor search depth is 3; `--ancestor-depth` accepts values from 1 to 8 and
 search stops before an ancestor that contains the selected single name more
 than once.
+
+`--table name` declares a table output and `--table-column name=header` adds a
+required header for that table. Repeat both options to request multiple tables;
+each table is matched independently inside every record using all its headers.
+If two tables in one record match the same declaration, extraction returns an
+ambiguity error. `values.<name>` contains the table's `headers` and ordered
+`rows`; each cell includes its visible `text`, original `html`, and `header`
+when one is available. Table-only extraction does not require a `--field`.
 
 The daemon uses a Unix domain socket at `$XDG_RUNTIME_DIR/semcrawl.sock`, or
 `<user config directory>/semcrawl/semcrawl.sock` when that environment variable

@@ -238,3 +238,29 @@ semantic guess.
   accidental child-node records.
 - Pages without list-item or article wrappers fall back to the exact matching
   node as the record root; callers may need semantic search for other layouts.
+
+## ADR-008: Named Table Extraction by Header Constraints
+
+### Status
+Accepted
+
+### Context
+Some matched records contain multiple tables with different kinds of values.
+Selecting isolated columns cannot identify which table's rows belong together,
+and callers may need the original markup for cells containing links or nested
+content.
+
+### Decision
+1. Declare each output table with repeatable `--table name` and associate
+   required header text using repeatable `--table-column name=header`.
+2. Match each declaration independently inside each record by requiring all
+   specified header texts in the same table.
+3. Return every row and cell for the matching table, including visible text and
+   the cell's outer HTML. Report an error if more than one table matches one
+   declaration inside a record.
+
+### Consequences
+- One record can return multiple separately named tables without selecting
+  individual columns.
+- Header text is the table identity; layouts with duplicate header sets are
+  reported as ambiguous and need a more distinctive set of headers.

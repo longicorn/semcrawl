@@ -52,6 +52,12 @@ type Result struct {
 
 type ExtractOptions struct {
 	AnchorText string
+	Tables     []TableSpec
+}
+
+type TableSpec struct {
+	Name    string   `json:"name"`
+	Columns []string `json:"columns"`
 }
 
 type candidate struct {
@@ -97,7 +103,10 @@ func (e *Extractor) ExtractWithOptions(ctx context.Context, page browser.DOMSnap
 	if strings.TrimSpace(target) == "" && strings.TrimSpace(options.AnchorText) != "" {
 		target = "records containing the exact text " + strings.TrimSpace(options.AnchorText)
 	}
-	if err := Validate(target, fields, limit); err != nil {
+	if err := Validate(target, fields, limit); err != nil && !(len(fields) == 0 && len(options.Tables) > 0 && limit >= 1 && limit <= 100 && strings.TrimSpace(target) != "") {
+		return nil, err
+	}
+	if err := ValidateTables(options.Tables); err != nil {
 		return nil, err
 	}
 	target = strings.TrimSpace(target)
@@ -128,16 +137,152 @@ func (e *Extractor) ExtractWithOptions(ctx context.Context, page browser.DOMSnap
 	if len(matches) == 0 {
 		return result, nil
 	}
-	fieldUsage, fieldModel, err := e.extractFieldsFromRepresentative(ctx, page, target, fields, matches, result.Items, options.AnchorText)
-	if err != nil {
-		return nil, err
+	if len(fields) > 0 {
+		fieldUsage, fieldModel, err := e.extractFieldsFromRepresentative(ctx, page, target, fields, matches, result.Items, options.AnchorText)
+		if err != nil {
+			return nil, err
+		}
+		result.Usage.InputTokens += fieldUsage.InputTokens
+		result.Usage.OutputTokens += fieldUsage.OutputTokens
+		if fieldModel != "" {
+			result.Model = fieldModel
+		}
 	}
-	result.Usage.InputTokens += fieldUsage.InputTokens
-	result.Usage.OutputTokens += fieldUsage.OutputTokens
-	if fieldModel != "" {
-		result.Model = fieldModel
+	if len(options.Tables) > 0 {
+		if err := extractTables(page, options.Tables, matches, result.Items); err != nil {
+			return nil, err
+		}
 	}
 	return result, nil
+}
+
+func ValidateTables(tables []TableSpec) error {
+	seen := map[string]bool{}
+	for _, table := range tables {
+		if strings.TrimSpace(table.Name) == "" || seen[table.Name] {
+			return fmt.Errorf("table names must be non-empty and unique: %q", table.Name)
+		}
+		seen[table.Name] = true
+		if len(table.Columns) == 0 {
+			return fmt.Errorf("table %q needs at least one --table-column", table.Name)
+		}
+		for _, column := range table.Columns {
+			if strings.TrimSpace(column) == "" {
+				return fmt.Errorf("table %q has an empty column header", table.Name)
+			}
+		}
+	}
+	return nil
+}
+
+func extractTables(page browser.DOMSnapshot, specs []TableSpec, matches []candidate, output []Match) error {
+	children := childIndex(page.Nodes)
+	byID := nodeIndex(page.Nodes)
+	for itemIndex, match := range matches {
+		nodes := descendants(match.node.ID, children)
+		var tableNodes []browser.DOMNode
+		for _, node := range nodes {
+			if node.Tag == "table" {
+				tableNodes = append(tableNodes, node)
+			}
+		}
+		for _, spec := range specs {
+			var found []browser.DOMNode
+			for _, table := range tableNodes {
+				if tableHasHeaders(table, spec.Columns, children, byID) {
+					found = append(found, table)
+				}
+			}
+			if len(found) > 1 {
+				return fmt.Errorf("item %s has %d tables matching --table %q headers", match.node.ID, len(found), spec.Name)
+			}
+			if len(found) == 0 {
+				output[itemIndex].Values[spec.Name] = nil
+				continue
+			}
+			output[itemIndex].Values[spec.Name] = serializeTable(found[0], children, byID)
+		}
+	}
+	return nil
+}
+
+func tableHasHeaders(table browser.DOMNode, required []string, children map[string][]browser.DOMNode, byID map[string]browser.DOMNode) bool {
+	want := make(map[string]bool, len(required))
+	for _, header := range required {
+		want[normalizeVisibleText(header)] = false
+	}
+	for _, node := range descendants(table.ID, children) {
+		if node.Tag == "th" && nearestTag(node, "table", byID) == table.ID {
+			if _, ok := want[normalizeVisibleText(node.Text)]; ok {
+				want[normalizeVisibleText(node.Text)] = true
+			}
+		}
+	}
+	for _, present := range want {
+		if !present {
+			return false
+		}
+	}
+	return true
+}
+
+func serializeTable(table browser.DOMNode, children map[string][]browser.DOMNode, byID map[string]browser.DOMNode) map[string]any {
+	var rows []browser.DOMNode
+	for _, node := range descendants(table.ID, children) {
+		if node.Tag == "tr" && nearestTag(node, "table", byID) == table.ID {
+			rows = append(rows, node)
+		}
+	}
+	headers := []string{}
+	for _, row := range rows {
+		var cells []browser.DOMNode
+		for _, node := range descendants(row.ID, children) {
+			if (node.Tag == "td" || node.Tag == "th") && nearestTag(node, "tr", byID) == row.ID {
+				cells = append(cells, node)
+			}
+		}
+		if len(headers) == 0 {
+			for _, cell := range cells {
+				if cell.Tag == "th" {
+					headers = append(headers, strings.TrimSpace(cell.Text))
+				}
+			}
+		}
+	}
+	serializedRows := make([]any, 0, len(rows))
+	for _, row := range rows {
+		var cells []browser.DOMNode
+		for _, node := range descendants(row.ID, children) {
+			if (node.Tag == "td" || node.Tag == "th") && nearestTag(node, "tr", byID) == row.ID {
+				cells = append(cells, node)
+			}
+		}
+		serializedCells := make([]any, 0, len(cells))
+		for i, cell := range cells {
+			entry := map[string]any{"tag": cell.Tag, "text": strings.TrimSpace(cell.Text), "html": cell.HTML}
+			if i < len(headers) && headers[i] != "" {
+				entry["header"] = headers[i]
+			}
+			serializedCells = append(serializedCells, entry)
+		}
+		serializedRows = append(serializedRows, serializedCells)
+	}
+	return map[string]any{"headers": headers, "rows": serializedRows}
+}
+
+func nearestTag(node browser.DOMNode, tag string, byID map[string]browser.DOMNode) string {
+	parentID := node.ParentID
+	for parentID != "" {
+		parent, ok := byID[parentID]
+		if !ok {
+			return ""
+		}
+		if parent.Tag == tag {
+			return parent.ID
+		}
+		parentID = parent.ParentID
+	}
+	return ""
 }
 
 func addUsage(total *jev.Usage, usage jev.Usage) {
