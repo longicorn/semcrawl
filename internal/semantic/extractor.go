@@ -72,11 +72,11 @@ func (e *Extractor) Extract(ctx context.Context, page browser.DOMSnapshot, targe
 	}
 	target = strings.TrimSpace(target)
 
-	candidates := makeCandidates(page.Nodes, len(page.Nodes))
+	candidates := groupedCandidates(page.Nodes)
 	if len(candidates) == 0 {
 		return nil, ErrNoCandidates
 	}
-	matches, usage, model, err := e.findMatchesByPattern(ctx, page, target, candidates)
+	matches, usage, model, err := e.findGroupedMatches(ctx, page, target, fields, candidates)
 	if err != nil {
 		return nil, err
 	}
@@ -102,137 +102,9 @@ func (e *Extractor) Extract(ctx context.Context, page browser.DOMSnapshot, targe
 	return result, nil
 }
 
-// findMatchesByPattern asks Jev to identify a representative record first,
-// then expands it to sibling records with the same tag and reusable classes.
-// It falls back to full candidate evaluation when no reliable group exists.
-func (e *Extractor) findMatchesByPattern(ctx context.Context, page browser.DOMSnapshot, target string, candidates []candidate) ([]candidate, jev.Usage, string, error) {
-	var totalUsage jev.Usage
-	model := ""
-	var representative *candidate
-	var representativeIndex int
-	for i := range candidates {
-		matched, usage, currentModel, err := e.findMatches(ctx, page, target, candidates[i:i+1])
-		addUsage(&totalUsage, usage)
-		if currentModel != "" {
-			model = currentModel
-		}
-		if err != nil {
-			return nil, totalUsage, model, err
-		}
-		if len(matched) > 0 {
-			representative = &matched[0]
-			representativeIndex = i
-			break
-		}
-	}
-	if representative == nil {
-		return nil, totalUsage, model, nil
-	}
-
-	selectors, usage, currentModel, err := e.selectReusableClasses(ctx, page, target, representative.node)
-	addUsage(&totalUsage, usage)
-	if currentModel != "" {
-		model = currentModel
-	}
-	if err == nil {
-		group := patternGroup(page.Nodes, representative.node, selectors)
-		if len(group) > 1 {
-			for i := range group {
-				group[i].repeated = true
-				group[i].score = representative.score
-			}
-			return group, totalUsage, model, nil
-		}
-	}
-
-	// If selector interpretation fails or returns nothing, retain the robust
-	// all-candidate evaluator as a fallback, excluding already checked nodes.
-	remaining := append([]candidate(nil), candidates[representativeIndex+1:]...)
-	matched, usage, currentModel, fallbackErr := e.findMatches(ctx, page, target, remaining)
-	addUsage(&totalUsage, usage)
-	if currentModel != "" {
-		model = currentModel
-	}
-	if fallbackErr != nil {
-		return nil, totalUsage, model, fallbackErr
-	}
-	matched = append([]candidate{*representative}, matched...)
-	return matched, totalUsage, model, nil
-}
-
-func (e *Extractor) selectReusableClasses(ctx context.Context, page browser.DOMSnapshot, target string, representative browser.DOMNode) ([]string, jev.Usage, string, error) {
-	tokens := strings.Fields(representative.Class)
-	if len(tokens) == 0 {
-		return nil, jev.Usage{}, "", nil
-	}
-	questions := make(map[string]jev.Question, len(tokens))
-	for index, token := range tokens {
-		questions[fmt.Sprintf("class_%d", index)] = jev.Question{
-			Type:         jev.QuestionNoul,
-			Instructions: fmt.Sprintf("Would the class token %q on representative <%s> reliably identify other records matching %q on this page? Say yes only if it is a reusable record/container class, not a layout, state, or decoration class.", token, representative.Tag, target),
-			Criteria:     map[string]any{"true": "This class token identifies the same type of record elements.", "false": "This class token is generic, decorative, or does not identify records."},
-		}
-	}
-	response, err := e.evaluator.Evaluate(ctx, jev.Request{
-		State: map[string]any{
-			"page":           map[string]string{"title": page.Title},
-			"user_request":   target,
-			"representative": describeNode(representative),
-			"class_tokens":   tokens,
-		},
-		Questions: questions,
-	})
-	if err != nil {
-		return nil, jev.Usage{}, "", fmt.Errorf("Jev representative class selection: %w", err)
-	}
-	var selected []string
-	for index, token := range tokens {
-		answer, ok := response.Answers[fmt.Sprintf("class_%d", index)]
-		if !ok || answer.Type != jev.QuestionNoul || answer.Noul == nil {
-			return nil, response.Usage, response.Model, fmt.Errorf("Jev response is missing reusable class decision for %q", token)
-		}
-		if *answer.Noul >= matchThreshold {
-			selected = append(selected, token)
-		}
-	}
-	return selected, response.Usage, response.Model, nil
-}
-
-func patternGroup(nodes []browser.DOMNode, representative browser.DOMNode, classes []string) []candidate {
-	if len(classes) == 0 {
-		return nil
-	}
-	var out []candidate
-	for _, node := range nodes {
-		if node.Tag != representative.Tag || !hasAnyClass(node.Class, classes) || !eligibleSemanticNode(node) || !usefulNodeText(node) {
-			continue
-		}
-		out = append(out, candidate{node: node, repeated: true})
-	}
-	return out
-}
-
-func hasAnyClass(class string, targets []string) bool {
-	for _, target := range targets {
-		if hasClass(class, target) {
-			return true
-		}
-	}
-	return false
-}
-
 func addUsage(total *jev.Usage, usage jev.Usage) {
 	total.InputTokens += usage.InputTokens
 	total.OutputTokens += usage.OutputTokens
-}
-
-func hasClass(class, target string) bool {
-	for _, token := range strings.Fields(class) {
-		if token == target {
-			return true
-		}
-	}
-	return false
 }
 
 func Validate(target string, fields []Field, limit int) error {
@@ -570,9 +442,6 @@ func repeatedCount(matches []candidate) int {
 
 func normalizedClass(class string) string {
 	parts := strings.Fields(class)
-	if len(parts) > 4 {
-		parts = parts[:4]
-	}
 	sort.Strings(parts)
 	return strings.Join(parts, ".")
 }

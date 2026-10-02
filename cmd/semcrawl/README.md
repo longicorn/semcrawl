@@ -27,8 +27,9 @@ API. Set `TYPESAFE_API_KEY` before starting the daemon (or before the first
 `open`, which starts it automatically). The `--target` and each `--field`
 description are natural language; field names become keys in the JSON output.
 Use `--limit` to control the maximum number of matching result items returned
-(default 20, maximum 100). All usable candidates from the page are evaluated
-before this return limit is applied.
+(default 20, maximum 100). Tag/class groups are shortlisted before actual nodes are verified in batches.
+When no records match, requested field elements seed a bottom-up ancestor
+search. The return limit is applied after matching, before field extraction.
 The response contains an `items` array with one `values` object and a Jev match
 score per item, along with the model and reported token usage.
 

@@ -132,7 +132,7 @@ func (t *chromeTab) DOMSnapshot(ctx context.Context) (DOMSnapshot, error) {
     return {
       id: ids.get(el), parent_id: ids.get(el.parentElement) || "", order,
       tag: el.tagName.toLowerCase(), role: el.getAttribute("role") || "",
-      class: typeof el.className === "string" ? el.className.slice(0, 160) : "",
+      class: typeof el.className === "string" ? el.className : "",
       aria_label: el.getAttribute("aria-label") || "",
       text: clean(el.innerText || el.textContent).slice(0, 700),
       direct_text: clean(direct).slice(0, 300),

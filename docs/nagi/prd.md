@@ -183,3 +183,14 @@ end
    - Add curl/HTTP client mode for static pages where headless browser rendering is redundant.
 3. **Official Client Bindings:**
    - Provide minimal, idiomatic gems/packages (Ruby, Python, Node.js) wrapping the CLI/Daemon protocol with automatic block-scoped session cleanup.
+
+
+## 8. Accepted Extraction Search Update
+
+For the current `extract <session_id> --target ... --field name=description`
+interface, implement ADR-005: shortlist locally collected tag/class groups using
+bounded Jev summaries, verify their nodes in batches, and use field-anchored
+bottom-up ancestor search if no target records match. Reuse the DOM snapshot,
+Jev client, and representative field extraction. Preserve output ordering and
+usage reporting. The hierarchical query and interaction interfaces above remain
+separate requirements; this update changes the current extraction search only.
